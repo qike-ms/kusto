@@ -1,0 +1,39 @@
+﻿// CRP E2E Latency Budget for last week
+//=======================================================
+let MyMonth = datetime(2019-06-01); //Define month
+//=======================================================
+cluster('executiongraph').database('eg').CrpNewDeployments() 
+| where StartTime >= startofmonth(MyMonth) and StartTime <= endofmonth(MyMonth) // TimeFrame
+| where SubscriptionId == "359833f5-8592-40b6-8175-edc664e2196a"
+| where Region !in ('CentralUSEUAP','EastUS2EUAP','WestUSValidation') // Remove Canary + Validation 
+//| where UsesManagedOsDisk == 1  // ManageDisk only
+//| where OsDiskStorageAccountType contains 'premium' // Premium only 
+//| where tolower(VmSize) startswith 'standard_d' // DS SKU (DS*, DS*v2, D*s_v3)
+// Guest OS
+//| where ImageOffer == "UbuntuServer" and ImageSku contains "16.04-LTS" // Ubuntu
+//| where ImageOffer == "WindowsServer" and ImageSku == "2012-R2-Datacenter" // Win 2012 R2
+//| where ImageOffer == "WindowsServer" and ImageSku contains "2016" // Windows 2016
+| project CrpOperationId, CorrelationId, E2EDurationInSeconds, ControlPathDurationInSeconds, DataPathDurationInSeconds, NotificationPathDurationInSeconds, VmSize, ImageOffer, ImageSku
+| summarize DeployCount=count(),                                                            // Total Deployment  
+        (E2E_P50,E2E_P95,E2E_P99)=percentiles(E2EDurationInSeconds,50,95,99),               // E2E Latency
+        (CP_P50,CP_P95,CP_P99)=percentiles(ControlPathDurationInSeconds,50, 95, 99),        // Control Path
+        (DP_P50,DP_P95,DP_P99)=percentiles(DataPathDurationInSeconds,50, 95, 99),           // Data Path 
+        (NP_P50,NP_P95,NP_P99)=percentiles(NotificationPathDurationInSeconds,50, 95, 99),   // Notification Path 
+        max(VmSize), max(ImageOffer), max(ImageSku)                                         // CRC on Size, Sku
+
+
+// CRP E2E Latency Budget for last week
+//=======================================================
+let MyMonth = datetime(2019-06-01); //Define month
+//=======================================================
+cluster('executiongraph').database('eg').CrpNewDeployments() 
+| where StartTime >= startofmonth(MyMonth) and StartTime <= endofmonth(MyMonth) // TimeFrame
+| where SubscriptionId == "359833f5-8592-40b6-8175-edc664e2196a"
+| where Region !in ('CentralUSEUAP','EastUS2EUAP','WestUSValidation') // Remove Canary + Validation 
+//| where UsesManagedOsDisk == 1  // ManageDisk only
+//| where OsDiskStorageAccountType contains 'premium' // Premium only 
+//| where tolower(VmSize) startswith 'standard_d' // DS SKU (DS*, DS*v2, D*s_v3)
+// Guest OS
+//| where ImageOffer == "aks"// and ImageSku contains "16.04-LTS" // Ubuntu
+| project CrpOperationId, CorrelationId, E2EDurationInSeconds, ControlPathDurationInSeconds, DataPathDurationInSeconds, NotificationPathDurationInSeconds, VmSize, ImageOffer, ImageSku
+| summarize DeployCount=count() by VmSize, ImageOffer, ImageSku 

@@ -1,0 +1,45 @@
+// number of CCPs on the clusters which will expire on Nov 2019
+UnderlayNodeInfo
+| where TIMESTAMP > ago(1h)
+| where CertNextExpires < datetime(2019-12-01)
+| summarize arg_max(PreciseTimeStamp, *) by VMID
+| where ResourceGroup !hassuffix "-svc"
+| summarize max(CCPTotal) by CertNextExpires, ResourceGroup, Region
+| summarize NumberCCPtoMigrate=sum(max_CCPTotal) by Region
+
+// number of CCPs on the clusters which will expire on Dec 2019
+UnderlayNodeInfo
+| where TIMESTAMP > ago(1h)
+| where CertNextExpires >= datetime(2019-12-01) and CertNextExpires < datetime(2020-01-01)
+| summarize arg_max(PreciseTimeStamp, *) by VMID
+| where ResourceGroup !hassuffix "-svc"
+| summarize max(CCPTotal) by CertNextExpires, ResourceGroup, Region
+| summarize NumberCCPtoMigrate=sum(max_CCPTotal) by Region
+
+
+// day by day in 2019
+UnderlayNodeInfo
+| where TIMESTAMP > ago(1h)
+| where CertNextExpires < datetime(2020-01-01)
+| summarize arg_max(PreciseTimeStamp, *) by VMID
+| where ResourceGroup !hassuffix "-svc"
+| summarize max(CCPTotal) by CertNextExpires, ResourceGroup, Region
+| summarize NumberCCPtoMigrate=sum(max_CCPTotal) by bin(CertNextExpires, 1d), Region
+
+// month by month in 2020+ 
+UnderlayNodeInfo
+| where TIMESTAMP > ago(1h)
+| where CertNextExpires >= datetime(2020-01-01) and CertNextExpires < datetime(2022-01-01)
+| summarize arg_max(PreciseTimeStamp, *) by VMID
+| where ResourceGroup !hassuffix "-svc"
+| summarize max(CCPTotal) by CertNextExpires, ResourceGroup, Region
+| summarize NumberCCPtoMigrate=sum(max_CCPTotal) by Month=strcat(getyear(CertNextExpires), "-", getmonth(CertNextExpires)), Region
+| order by Month asc
+
+// cx underlay clusters expiration time
+UnderlayNodeInfo
+| where TIMESTAMP > ago(1h) 
+| summarize arg_max(PreciseTimeStamp, *) by VMID
+| where ResourceGroup !hassuffix "-svc"
+| distinct CertNextExpires, ResourceGroup
+| order by CertNextExpires asc

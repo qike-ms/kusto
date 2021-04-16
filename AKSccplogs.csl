@@ -1,0 +1,309 @@
+// This file captures CCP events stats
+// For debugging one cluster, use file: AKS-debug.kql
+
+// Audit logs related to network policy
+ControlPlaneEvents
+| where TIMESTAMP > ago(1h)
+| where category == 'kube-audit'  and not(properties contains "calico") and  properties contains "NetworkPolicy"
+| extend p=todynamic(properties) | extend log = todynamic(tostring(p.log)) 
+| extend decision=log.annotations["authorization.k8s.io/decision"], responseObject = log.responseObject, respKind = log.responseObject.kind
+| project p, log, responseObject, respKind, decision, properties //| where decision == 'deny'
+| take 10
+
+ControlPlaneEvents
+| where TIMESTAMP > ago(1h)
+| where category == 'kube-audit' and properties contains "calico" and  properties contains "NetworkPolicy"
+| extend p=todynamic(properties) | extend log = todynamic(tostring(p.log)) 
+| extend decision=log.annotations["authorization.k8s.io/decision"], responseObject = log.responseObject
+| extend respKind = responseObject.metadata.name
+//| where respKind == "NetworkPolicy"
+| project p, log, responseObject, respKind, decision, properties //| where decision == 'deny'
+| take 10
+
+
+//
+// Get latency when VM returned without NIC (NetworkProfile)
+//
+union ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where TIMESTAMP > ago(30d)
+| where category == "kube-controller-manager"
+| where properties contains "failed to find the network interfaces" and properties contains "GetIPByNodeName"
+| extend p = parse_json(properties)
+| project PreciseTimeStamp, category, ccpNamespace, log=tostring(p.log)
+| parse log with * "err=failed to find the network interfaces for vm " instance
+| project PreciseTimeStamp, instance, ccpNamespace
+| summarize min_t = arg_min(PreciseTimeStamp, *), max_t = arg_max(PreciseTimeStamp, *) by instance, ccpNamespace
+| extend latency = max_t - min_t
+//| where latency > timespan(5m)
+| project ccpNamespace, instance, latency
+//| summarize count(), P50=percentile(latency, 50), P90=percentile(latency, 90), P95=percentile(latency, 95)
+
+
+//
+// removes env and args from containers in audit log
+//
+let get_pod=
+kubectl_get_pod("5f9cbd697c77d90001abb9af", ago(1h), now())
+| sort by ts
+| extend r = row_number();
+get_pod
+| extend response_spec = parse_json(response_spec)
+// expand containers
+| mv-expand with_itemindex=index response_spec.containers
+| mv-apply response_spec_containers on 
+(
+  // for each container, remove args and env keys
+  extend response_spec_containers=bag_remove_keys(response_spec_containers, dynamic(["args", "env"]))
+)
+// for each expanded container, re-pack back to json object
+| summarize containers=make_bag(response_spec_containers) by index, response_spec=tostring(response_spec), r
+// repack the containers back to array under "containers" key
+| summarize containers=pack("containers", make_list(containers)) by response_spec, r
+// remove "containers" key from response_spec
+| extend response_spec=bag_remove_keys(todynamic(response_spec), dynamic(['containers']))
+// merge response_spec with updated containers struct
+| extend response_spec = bag_merge(response_spec, containers)
+| join get_pod on r
+| project ts, namespace, name, ready, status, restarts, age, ip, node, response_metadata, response_spec, response_status
+
+//
+// Find route table update count from one kube-controller-manager
+//
+union ControlPlaneEvents, ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp between(datetime(2020-02-13T13:05:00Z)..datetime(2020-02-13T13:20:19Z))
+| where category == "kube-controller-manager" and namespace == "5e1dca92bde6400001e1c831"  // one cluster's CM
+| where properties contains "route" //properties contains "deleting route" or properties contains "deleted route"
+| extend log = parse_json(properties)
+| extend nodeName=extract("(aks-pool[0-9a-z-]+)", 1, properties)
+| project PreciseTimeStamp, nodeName, log.log
+//| summarize count() by nodeName
+| sort by PreciseTimeStamp asc
+
+union ControlPlaneEvents, ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp < ago(30m) and PreciseTimeStamp > ago(40m)
+| where category == "kube-controller-manager"
+| project ccpNamespace, properties
+| where properties contains "FailedToCreateRoute"
+| summarize count() by ccpNamespace
+| sort by count_ desc 
+
+
+// 404 in apiserver logs for unlimited systems
+ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp > ago(1d) //between (datetime(2019-01-28T18:10)..datetime(2019-01-28T18:20))
+//| where namespace == "5b577afd6649aa0001b402b0" or namespace == "5bb26999ea1ef10001f12c07"
+| where category == "kube-apiserver"
+| where properties contains ' 401 '
+//| summarize count() by bin(PreciseTimeStamp, 1h), namespace 
+//| render timechart 
+
+ControlPlaneEvents
+| where PreciseTimeStamp > ago(1d) //between (datetime(2019-01-28T18:10)..datetime(2019-01-28T18:20))
+| where namespace == "5bb26999ea1ef10001f12c07"
+| where category == "kube-apiserver"
+| where properties contains ' 404 '
+| summarize count() by bin(PreciseTimeStamp, 1h)
+| render timechart 
+
+ControlPlaneEvents
+| where log containscs 'balancer'
+| take 2
+
+
+// cluster("aks").database("AKSccplogs")
+
+// 401 response
+ControlPlaneEvents
+| where TIMESTAMP > ago(1d)
+//| where TIMESTAMP between (datetime(2019-01-28T18:10)..datetime(2019-01-28T18:20))
+//| where namespace == "5b577afd6649aa0001b402b0"
+| where category == "kube-apiserver"
+| where RPTenant == 'eastus2euap'
+| where properties contains ' 401 '
+| extend bag=todynamic(properties)
+| project TIMESTAMP, resourceId, namespace, RPTenant, Underlay, category, bag
+| distinct resourceId, namespace
+
+
+/////////////////////////////////////////
+// Get API server memory and CPU usage
+/////////////////////////////////////////
+
+// CCP memory and CPU use
+let ccpNS = '5ee183281e8541000166d145';  // walgreen // '5f2da4204dcff40001191ceb'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+|where TIMESTAMP > ago(24h)
+| where ccpNamespace == ccpNS
+| project TIMESTAMP,  apiMemMeg = apiserverMemory / 1000000., apiserverCPU, etcdCPU, etcdMemMeg = etcdMemory / 1000000., 
+  customerPodCount, totalAgentCores
+| render timechart 
+
+// etcd events
+let ccpNS = '5f2da4204dcff40001191ceb';
+ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp > ago(1h)
+| where category == "etcd"
+| where ccpNamespace == ccpNS
+| take 100
+
+///////////////////////////////////////////////////////////
+// Get API server request volume per verb or user-agent
+///////////////////////////////////////////////////////////
+
+// Get API server request volume per verb
+//let ccpNS = '5ef27dbd1c0c98000172bbfa';
+let ccpNS = '5ee183281e8541000166d145';  // walgreen
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp > ago(24h) // between (datetime(09/01/2020 08:30:00)..datetime(09/01/2020 12:15:00))
+| where ccpNamespace == ccpNS
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))
+| where event.stage == "ResponseComplete"
+| extend verb = tostring(event.verb), response=tostring(event.responseStatus.code)
+//| where verb == "watch"
+| where response == "200"
+| summarize count() by verb, bin(PreciseTimeStamp, 1m)
+| render stackedareachart // timechart 
+
+
+// Get API server request volume per userAgent
+//let ccpNS = '5ef27dbd1c0c98000172bbfa';
+let ccpNS = '5ee183281e8541000166d145';  // walgreen
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp > ago(24h) // between (datetime(09/01/2020 08:30:00)..datetime(09/01/2020 12:15:00))
+| where ccpNamespace == ccpNS
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))
+| where event.stage == "ResponseComplete"
+| extend verb = tostring(event.verb), response=tostring(event.responseStatus.code), username=tostring(event.user.username), useragent=tostring(event.userAgent), uri=tostring(event.requestURI)
+//| where verb == "watch"
+| where response == "200"
+| summarize count() by useragent, bin(PreciseTimeStamp, 1m)
+| render stackedareachart 
+
+// Get API server request volume per username
+//let ccpNS = '5ef27dbd1c0c98000172bbfa';
+let ccpNS = '5ee183281e8541000166d145';  // walgreen
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp > ago(24h) // between (datetime(09/01/2020 08:30:00)..datetime(09/01/2020 12:15:00))
+| where ccpNamespace == ccpNS
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))
+| where event.stage == "ResponseComplete"
+| extend verb = tostring(event.verb), response=tostring(event.responseStatus.code), username=tostring(event.user.username), useragent=tostring(event.userAgent), uri=tostring(event.requestURI)
+//| where verb == "watch"
+| where response == "200"
+| summarize count() by username, bin(PreciseTimeStamp, 1m)
+| sort by count_ desc
+| render stackedareachart
+
+// Get API server latency per verb
+let ccpNS = '5ee183281e8541000166d145';  // walgreen
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp > ago(24h) // between (datetime(09/01/2020 08:30:00)..datetime(09/01/2020 12:15:00))
+| where ccpNamespace == ccpNS
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))
+| where event.stage == "ResponseComplete"
+| extend verb = tostring(event.verb), response=tostring(event.responseStatus.code)
+| where verb != "watch"
+| where response == "200"
+// | where event.user.username == "system:serviceaccount:kube-system:kube-proxy"
+// | where event.user.username == "nodeclient"
+| extend lat=datetime_diff('Millisecond', todatetime(event.stageTimestamp), todatetime(event.requestReceivedTimestamp))
+| summarize percentiles(lat, 99, 90, 50) by tostring(verb)
+
+
+// Get API server request volume for a particular userAgent
+let resource_name = "5f2da4204dcff40001191ceb";
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp between (datetime(2020-09-02T16:00)..datetime(2020-09-04T00:30))
+| where ccpNamespace == resource_name
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))
+| where event.stage == "ResponseComplete"
+| extend lat=todatetime(event.stageTimestamp)-todatetime(event.requestReceivedTimestamp)
+// | where event.verb == "patch"
+| where event.responseStatus.code == "200"
+| extend verb=tostring(event.verb)
+| extend code=tostring(event.responseStatus.code)
+| extend username=tostring(event.user.username)
+| extend request_uri=tostring(event.requestURI)
+| extend resource=tostring(event.objectRef.resource)
+| extend namespace=tostring(event.objectRef.namespace)
+| extend sub_resource=tostring(event.objectRef.subresource)
+| extend resource_name=tostring(event.objectRef.name)
+| extend agent=tostring(event.userAgent)
+| extend source_ip=tostring(event.sourceIPs)
+// | where username == "nodeclient"
+// | where resource == "pods"
+| where agent == "containerserviceasync/v0.0.0 (linux/amd64) kubernetes/$Format"
+| summarize count() by bin(PreciseTimeStamp, 1h), verb
+| render stackedareachart
+
+// Get API server request volume from Istio
+//let ccpNS = '5ef27dbd1c0c98000172bbfa';
+let ccpNS = '5ee183281e8541000166d145';  // walgreen
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp > ago(24h) // between (datetime(09/01/2020 08:30:00)..datetime(09/01/2020 12:15:00))
+| where ccpNamespace == ccpNS
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))
+| where event.stage == "ResponseComplete"
+| extend verb = tostring(event.verb), response=tostring(event.responseStatus.code), username=tostring(event.user.username), useragent=tostring(event.userAgent), uri=tostring(event.requestURI)
+//| where verb == "watch"
+| where response == "200"
+| where useragent startswith 'mixs/v0.0.0'
+| summarize count() by bin(PreciseTimeStamp, 1m)
+| render timechart  
+
+// might be red herring
+// Get etcd overloaded events
+let ccpNS = '5ee183281e8541000166d145';  // walgreen
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, cluster('aks').database('AKSccplogs').ControlPlaneEvents
+| where PreciseTimeStamp > ago(24h)
+| where ccpNamespace == ccpNS
+| where category == 'etcd'
+| extend p=parse_json(properties)
+| where p.log contains "overloaded"
+| project PreciseTimeStamp, p.pod, p.log
+
+/////////////////////////////////////////////////
+// Get pod termination for a customer's cluster
+/////////////////////////////////////////////////
+// CCP OOMKilled Events with details parsed out
+let ccpNS = '5ee183281e8541000166d145';  // walgreen
+cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp > ago(24h)
+| where ccpNamespace == ccpNS
+| where properties contains  "terminated" //"OOMKilled"  // 
+| extend log=parse_json(tostring(parse_json(parse_json(properties).log)))
+| extend cs=log.requestObject.status.containerStatuses[0]
+//| where cs.lastState.terminated.reason != ""
+| project PreciseTimeStamp, reason=cs.lastState.terminated.reason, exitcode=cs.lastState.terminated.exitCode
+          , cs.image, pod = log.objectRef.name, ns=log.objectRef.namespace, cs.restartCount
+          , log.responseObject.spec, log.responseObject.spec.template.spec.containers[0].resources
+          , startedAt=cs.lastState.terminated.startedAt, finishedAt=cs.lastState.terminated.finishedAt, cs.lastState.terminated.message
+          , log.user.username, log.userAgent, log.requestURI, log.verb, log
+| sort by PreciseTimeStamp desc
+
+
+// Get events count by userAgent for given cluster
+let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp > ago(3d)
+| where properties contains "userAgent"
+| where ccpNamespace == ccpNS
+| extend p = parse_json(properties)
+| extend log = parse_json(tostring(p.log)) | extend username=tostring(log.user.username), userAgent=tostring(log.userAgent)
+| summarize count() by bin(PreciseTimeStamp, 1h), userAgent | where count_ > 3600
+| render timechart 
+
+
+
+let ccpNS = '5f600dfda92d6500016a751f'; // azure-rbac // '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp >= ago(1h)
+| where ccpNamespace == ccpNS
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))

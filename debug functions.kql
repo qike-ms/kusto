@@ -1,0 +1,74 @@
+﻿.create-or-alter function with (
+  folder = "qike", 
+  docstring = "Get ccp namespace", 
+  skipvalidation = "false")
+getCCPByFQDN(f : string) {
+   BlackboxMonitoringActivity
+   | where TIMESTAMP > ago (1h)
+   | where fqdn == f
+   | distinct ccpNamespace
+}
+
+.create-or-alter function with (
+  folder = "qike", 
+  docstring = "Get ccp namespace", 
+  skipvalidation = "false")
+getCCPById(resourceId : string) {
+   let arr = split(resourceId, "/");
+   BlackboxMonitoringActivity
+   | where TIMESTAMP > ago (1h)
+   | where subscriptionID == arr[2] and resourceGroupName == arr[4] and clusterName == arr[8]
+   | distinct ccpNamespace
+}
+
+.create-or-alter function with (
+  folder = "qike", 
+  docstring = "Get ccp namespace", 
+  skipvalidation = "false")
+getCCPBySubRgCluster(sub : string, rg : string, c : string) {
+   BlackboxMonitoringActivity
+   | where TIMESTAMP > ago (1h)
+   | where subscriptionID == sub and resourceGroupName == rg and clusterName == c
+   | distinct ccpNamespace
+}
+
+.create-or-alter function with (
+  folder = "qike", 
+  docstring = "Get cluster api and etcd cpu and memory usage", 
+  skipvalidation = "false")
+getCpuMem(ccp : string, starttime : datetime, endtime : datetime ) {
+  BlackboxMonitoringActivity
+  |where TIMESTAMP between (starttime..endtime)
+  | where ccpNamespace == ccp
+  //| where customerPodCount == 0 and apiserverMemory > 5000000000
+  | project TIMESTAMP, apiMemMeg = apiserverMemory / 1000000., apiserverCPU, 
+    etcdCPU, etcdMemMeg = etcdMemory / 1000000., 
+    customerPodCount, totalAgentCores
+}
+
+
+.create-or-alter function with (
+  folder = "qike", 
+  docstring = "Get cluster states", 
+  skipvalidation = "false")
+getBBMState(ccp : string, starttime : datetime, endtime : datetime ) {
+  BlackboxMonitoringActivity
+  |where TIMESTAMP between (starttime..endtime)
+  | where ccpNamespace == ccp
+  | project TIMESTAMP, msg,
+    ['state'], supportedState, addonPodsState, podsState, resourceState, componentsPodsState, 
+    customerPodCount, totalAgentCores, kubeSystemPodCount,
+    apiMemMeg = apiserverMemory / 1000000., apiserverCPU, 
+    etcdCPU, etcdMemMeg = etcdMemory / 1000000.
+}
+
+
+// Tests
+getCCPByFQDN("cni-np-qikeeastus-13b787-084ee0d8.hcp.eastus.azmk8s.io")
+
+getCCPBySubRgCluster("13b78706-0ca6-42fe-9dee-7a05c0396391", "qike_eastus", "rbac")
+
+getCCPById("/subscriptions/13b78706-0ca6-42fe-9dee-7a05c0396391/resourcegroups/qike_eastus/providers/Microsoft.ContainerService/managedClusters/rbac")
+
+let a = split("/subscriptions/13b78706-0ca6-42fe-9dee-7a05c0396391/resourcegroups/qike_eastus/providers/Microsoft.ContainerService/managedClusters/rbac", "/");
+print a[2], a[4], a[8]

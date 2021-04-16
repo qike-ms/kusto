@@ -1,0 +1,232 @@
+﻿// Last updated: 1/13/2020
+
+
+// Get activities of all cluster on a given underlay
+let underlay='hcp-underlay-westeurope-cx-80'; //'hcp-underlay-centralus-c1';
+BlackboxMonitoringActivity
+| where TIMESTAMP > ago(1h)
+| where underlayName == underlay
+| summarize arg_max(TIMESTAMP, *) by subscriptionID, resourceGroupName, clusterName, ccpNamespace
+
+//////////
+// get msg from each CCP on an underlay
+let underlay='hcp-underlay-centralus-c1';
+BlackboxMonitoringActivity
+| where PreciseTimeStamp >= ago(30m)
+| where underlayName == underlay
+| summarize arg_max(PreciseTimeStamp, *) by ccpNamespace
+//| project clusterName, state, clusterBirthdate, totalCores, agentNodeCount, ccpNamespace, TIMESTAMP, fqdn
+| sort by agentNodeCount desc 
+| project msg
+//////////
+
+//////////
+// # of CCPs and unhealthy CCPs on underlays to find out if there is correlation between underlay usage and unhealthy CCPs
+let start=ago(30m);
+BlackboxMonitoringActivity
+| where PreciseTimeStamp >= start
+| summarize arg_max(PreciseTimeStamp, *) by ccpNamespace
+| where not(msg startswith "Skipped monitoring checks.") and namespace != 'osa'  // SKIP OSA and updating CCPs, this is to approximate the real CCPs running on underlay
+| summarize ccpCount=count(), unhealthy=countif(state!='Healthy' and agentNodeCount > 0) by underlayName  
+| sort by unhealthy desc 
+//| project ccpCount, unhealthy | render scatterchart 
+
+
+let start=ago(30m);
+BlackboxMonitoringActivity
+| where PreciseTimeStamp >= start
+| summarize arg_max(PreciseTimeStamp, *) by ccpNamespace
+| where agentNodeCount > 0
+| where not(msg startswith "Skipped monitoring checks.") and namespace != 'osa'  // SKIP OSA and updating CCPs, this is to approximate the real CCPs running on underlay
+| summarize ccpCount=count(), unhealthy=countif(state!='Healthy' and agentNodeCount > 0) by underlayName  
+| extend r = unhealthy*1.0/ccpCount
+| sort by r desc 
+//////////   
+
+
+// Count of CCPs in each state on each underlay
+let start=ago(30m);
+(
+  // Get number of CCPs on an underlay
+  BlackboxMonitoringActivity
+  | where PreciseTimeStamp >= start
+  | summarize arg_max(PreciseTimeStamp, *) by ccpNamespace
+  | summarize ccpCount=count() by underlayName  
+)
+| join (
+  BlackboxMonitoringActivity
+  | where PreciseTimeStamp >= start
+  | summarize arg_max(PreciseTimeStamp, *) by ccpNamespace
+  | summarize count() by underlayName, state
+  | evaluate pivot(state, sum(count_))
+) 
+on underlayName
+| project-away underlayName1
+| order by ccpCount desc
+//////////
+
+//////////
+// CCPs stuck for over 1 day, worth cleaning up
+BlackboxMonitoringActivity
+| where PreciseTimeStamp >= ago(30m)
+| summarize arg_max(PreciseTimeStamp, *) by ccpNamespace
+| where msg startswith "Skipped monitoring checks." and namespace != 'osa'
+| extend m = substring(msg, 0, 55)
+| project underlayName, ccpNamespace
+| join kind=inner (BlackboxMonitoringActivity
+| where PreciseTimeStamp < ago(1d) and PreciseTimeStamp > ago(2d)
+| summarize arg_max(PreciseTimeStamp, *) by ccpNamespace
+| where msg startswith "Skipped monitoring checks." and namespace != 'osa'
+| extend m = substring(msg, 0, 55)
+| project underlayName, ccpNamespace
+) on underlayName, ccpNamespace
+| summarize noupdate=count() by underlayName
+| sort by noupdate desc
+//////////
+
+
+// Get total underlays.
+BlackboxMonitoringActivity
+| where PreciseTimeStamp >= ago(30m)
+//| where provisioningState == "Succeeded"
+//| summarize arg_max(PreciseTimeStamp, *) by ccpNamespace
+| distinct  underlayName
+| summarize count()
+
+
+// Cert expiration
+BlackboxMonitoringActivity
+| where TIMESTAMP > ago(1h)
+| where agentNodeCount > 0 and customerPodCount > 0
+//| distinct fqdn, clusterCertExpiration, totalAgentCores
+| summarize arg_max(TIMESTAMP, *) by ccpNamespace
+| where clusterCertExpiration startswith "2019" or clusterCertExpiration startswith "2020"
+| extend expireDate=todatetime(clusterCertExpiration)
+//| summarize count(), sum(totalAgentCores) by bin(expireDate, 1d)
+| order by expireDate asc
+
+// Get PV stats
+BlackboxMonitoringActivity
+| where TIMESTAMP > ago(1h)
+| summarize arg_max(TIMESTAMP, *) by ccpNamespace
+| summarize count() by totalPersistentVolumeCount
+| sort by totalPersistentVolumeCount desc
+
+
+
+qosRuntimeAndCoresPerCustomer_prod(1d, ago(7d))
+
+
+////////////////////////////////////////////////////////////////////
+// ComputeUsage_Daily in cluster('accia').database('CUD')
+////////////////////////////////////////////////////////////////////
+
+// AKS: Get latest usage
+cluster('accia').database('CUD').ComputeUsage_Daily
+| where Timestamp >= ago(4d) 
+| where Extensions contains "Microsoft.AKS.Compute.AKS.Linux.Billing" or Extensions contains "Microsoft.AKS.Compute.AKS.Windows.Billing"
+| summarize arg_max(Timestamp, *) by VMId
+| summarize TotalCores = sum(QuantityCores) by bin(Timestamp, 1d), SubscriptionGuid = SubscriptionId, Location, Os, OsType
+
+// AKS: Get per day usage
+cluster('accia').database('CUD').ComputeUsage_Daily
+//| where Timestamp >= ago(90d)
+| where Extensions contains "Microsoft.AKS.Compute.AKS.Linux.Billing" or Extensions contains "Microsoft.AKS.Compute.AKS.Windows.Billing"
+| summarize TotalCores = sum(QuantityCores) by bin(Timestamp, 1d)
+//| render timechart 
+
+cluster('accia').database('CUD').ComputeUsage_Daily
+//| where Timestamp >= ago(90d)
+| where Extensions contains "Microsoft.AKS.Compute.AKS.Linux.Billing" or Extensions contains "Microsoft.AKS.Compute.AKS.Windows.Billing"
+| distinct SubscriptionId
+| count 
+
+
+/////////////////////////////////////////////////////
+// Function definitions for runtime qos. Need to be end of the file
+/////////////////////////////////////////////////////
+.show functions 
+| where Name startswith 'qosruntime'
+
+// .show function qosRuntimePerCustomer_prod
+.create-or-alter function with (folder = "prod_qos", docstring = "Runtime QoS per customer.", skipvalidation = "false")
+qosRuntimePerCustomer_prod(duration:timespan, start:datetime)
+{
+BlackboxMonitoringActivity
+| where PreciseTimeStamp >= start
+ and not(isTestSubscription(subscriptionID))
+ and not(isTestRegion(region))
+ and provisioningState =~ "Succeeded"
+ and agentNodeCount > 0
+| summarize unhealthy = countif(state =~ "Unhealthy"), total = count() 
+    by day=bin_at(TIMESTAMP, duration, now(-210d)), subscriptionID
+| project day, unhealthy, total, subscriptionID
+| where total > 0
+| join kind= leftouter
+(
+   cluster("accia").database("CommonDims").Dim_CustomerSubscription
+   | project SubscriptionGuid, Customer
+)
+on $left.subscriptionID == $right.SubscriptionGuid
+| project-away SubscriptionGuid
+| summarize sum(unhealthy), sum(total) by Customer, day
+| extend QoS = 1. - percent(sum_unhealthy, sum_total), endTime=day+duration
+| order by day desc, sum_total desc
+}
+
+// .show function qosRuntimeAndCoresPerCustomer_prod
+.create-or-alter function with (folder = "prod_qos", docstring = "Runtime QoS and total cores per customer.", skipvalidation = "false")
+qosRuntimeAndCoresPerCustomer_prod(duration:timespan, start:datetime) {
+BlackboxMonitoringActivity
+| where PreciseTimeStamp > start
+  and not(isTestSubscription(subscriptionID))
+  and not(isTestRegion(region))
+  and provisioningState =~ "Succeeded"
+  and agentNodeCount > 0
+| summarize unhealthy = countif(state =~ "Unhealthy"), total = count(), max(totalAgentCores) 
+  by day=bin_at(TIMESTAMP, duration, now(-210d)), subscriptionID
+| project day, unhealthy, total, subscriptionID, max_totalAgentCores
+| where total > 0
+| join kind= leftouter
+(
+  cluster("azcompute").database("CommonDataWarehouse").Dim_CustomerSubscription
+  | project SubscriptionGuid, Customer
+)
+on $left.subscriptionID == $right.SubscriptionGuid
+| project-away SubscriptionGuid
+| summarize sum(unhealthy), sum(total), totalAgentCores=sum(max_totalAgentCores) by day, Customer
+| extend QoS = 1. - percent(sum_unhealthy, sum_total)
+| order by day, totalAgentCores desc
+}
+
+// .show function qosRuntime_prod
+// excluding provioning failed
+.create-or-alter function with (folder = "prod_qos", docstring = "Runtime QoS with more details.", skipvalidation = "false")
+qosRuntime_prod(duration:timespan, end:datetime) {
+BlackboxMonitoringActivity
+| where PreciseTimeStamp >= end 
+  and not(isTestSubscription(subscriptionID))
+  and not(isTestRegion(region))
+| summarize unhealthy = countif(provisioningState =~ "Succeeded" and state =~ "Unhealthy"), 
+            total = countif(provisioningState =~ "Succeeded") by day=bin_at(TIMESTAMP, duration, now(-210d))
+| project endTime=day+duration, QoS = 1. - percent(unhealthy, total), total, unhealthy
+| order by endTime desc
+} 
+
+// .show function qosRuntimePerRegion_prod
+.create-or-alter function with (folder = "prod_qos", docstring = "Runtime QoS per region.", skipvalidation = "false")
+qosRuntimePerRegion_prod(duration:timespan, end:datetime) {
+BlackboxMonitoringActivity
+| where PreciseTimeStamp >= end
+ and not(isTestSubscription(subscriptionID))
+ and not(isTestRegion(region))
+| summarize unhealthy = countif(provisioningState =~ "Succeeded" and state =~ "Unhealthy"), total = countif(provisioningState =~ "Succeeded") by day=bin_at(TIMESTAMP, duration, now(-210d)), region
+| project endTime=day+duration, QoS = 1. - percent(unhealthy, total), total, unhealthy, region
+| order by endTime desc
+}
+
+// Azure CNI usage
+BlackboxMonitoringActivity
+| where TIMESTAMP > ago(1h)
+| summarize arg_max(TIMESTAMP, *) by region, subscriptionID, resourceGroupName, clusterName, ccpNamespace
+| summarize count() by isAzureCNI

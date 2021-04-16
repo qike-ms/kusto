@@ -1,0 +1,73 @@
+﻿// let clusterVersion = "5ee07f05782e8a000176b738";
+// let queryFrom = datetime(2020-08-20T23:00:00Z);
+// let queryTo = datetime(2020-08-20T23:50:00Z);
+OverlaymgrEvents
+// | where PreciseTimeStamp >= queryFrom and (isnull(queryTo) or PreciseTimeStamp < queryTo)
+// | where id == clusterVersion
+//| where id == "5ee07f05782e8a000176b738"
+| where PreciseTimeStamp > ago(2h)
+| where isnotempty(eventObjectName) and isnotempty(eventReason)
+| extend StartTime = todatetime(logPreciseTime)
+| project StartTime, eventObjectName, eventReason, eventMessage
+| where eventObjectName contains "etcd"
+| where eventReason == "FailedMount"
+| extend ns = extract("etcd-([0-9a-z.]+)-([0-9a-z.]+)", 1, eventObjectName)
+| order by eventObjectName asc
+// | summarize count() 
+// | order by StartTime asc
+
+
+OverlaymgrEvents
+// | where PreciseTimeStamp >= queryFrom and (isnull(queryTo) or PreciseTimeStamp < queryTo)
+// | where id == clusterVersion
+//| where id == "5ee07f05782e8a000176b738"
+| where PreciseTimeStamp > ago(2h)
+| where isnotempty(eventObjectName) and isnotempty(eventReason)
+| extend StartTime = todatetime(logPreciseTime)
+| project StartTime, eventObjectName, eventReason, eventMessage
+| where eventObjectName contains "etcd"
+| order by eventObjectName asc
+
+OverlaymgrEvents
+// | where PreciseTimeStamp >= queryFrom and (isnull(queryTo) or PreciseTimeStamp < queryTo)
+// | where id == clusterVersion
+//| where id == "5ee07f05782e8a000176b738"
+| where PreciseTimeStamp > ago(2h)
+| where isnotempty(eventObjectName) and isnotempty(eventReason)
+| extend StartTime = todatetime(logPreciseTime)
+| project TIMESTAMP, StartTime, eventObjectName, eventReason, eventMessage, id, UnderlayName, RPTenant
+| where eventObjectName contains "etcd"
+| where eventReason == "TaintManagerEviction"
+| order by eventObjectName asc
+
+OverlaymgrEvents
+| where PreciseTimeStamp > ago(1h)
+| where isnotempty(eventObjectName) and isnotempty(eventReason)
+| extend StartTime = todatetime(logPreciseTime)
+| project StartTime, RPTenant,  UnderlayName, eventObjectName, eventReason, eventMessage, id
+| where eventObjectName contains "etcd"
+| where eventReason startswith "Failed" or eventReason == 'Unhealthy'
+//| where eventMessage contains 'readiness probe failed'
+//| extend ns = extract("etcd-([0-9a-z.]+)-([0-9a-z.]+)", 1, eventObjectName)
+| join (BlackboxMonitoringActivity | where TIMESTAMP > ago(1h)
+  | summarize arg_max(TIMESTAMP, *) by ccpNamespace | where (clusterBirthdate startswith '2020' or clusterBirthdate startswith '2019')
+  ) 
+  on $left.id == $right.ccpNamespace
+| where provisioningState != 'Deleting'
+  //| summarize count() by eventReason
+
+
+BlackboxMonitoringActivity | where TIMESTAMP > ago(1h)
+  | summarize arg_max(TIMESTAMP, *) | where (clusterBirthdate startswith '2020' or clusterBirthdate startswith '2019' or clusterBirthdate startswith '2018')
+
+
+OverlaymgrEvents
+| where PreciseTimeStamp > ago(1h)
+| where isnotempty(eventObjectName) and isnotempty(eventReason)
+| extend StartTime = todatetime(logPreciseTime)
+| project StartTime, RPTenant,  UnderlayName, eventObjectName, eventReason, eventMessage, id
+| where eventObjectName contains "etcd"
+| distinct eventReason
+
+//| join (BlackboxMonitoringActivity | where TIMESTAMP > ago(2h)) on $left.ns == $right.ccpNamespace
+

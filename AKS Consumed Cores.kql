@@ -1,0 +1,403 @@
+﻿let lastRunEndtime = toscalar (AKSHourlyConsumedCores | summarize max(hour)) + 1h;  // add 1h because bin(PreciseTimeStamp, 1h) is the beginning of the hour
+let startTime = iff(lastRunEndtime <= ago(3h), lastRunEndtime, datetime(null)); // leave at least 1h between start and end, otherwise skip
+let endTime = iff(isnotnull(startTime), todatetime(strcat(format_datetime(ago(2h), 'yyyy-M-d H'), ":00:00Z")), datetime(null));
+print lastRunEndtime, startTime, endTime, now()
+
+// Inject AKS consumed cores and vms into a table
+.append AKSHourlyConsumedCores <|
+set notruncation;
+let lastRunEndtime = toscalar (AKSHourlyConsumedCores | summarize max(hour)) + 1h;  // add 1h because bin(PreciseTimeStamp, 1h) is the beginning of the hour
+let startTime = iff(lastRunEndtime <= ago(3h), lastRunEndtime, datetime(null)); // leave at least 1h between start and end, otherwise skip
+let endTime = iff(startTime != datetime(null), todatetime(strcat(format_datetime(ago(2h), 'yyyy-M-d H'), ":00:00Z")), datetime(null)); // Align to whole hour of 2h ago
+getHourlyServiceTreeConsumedCores(startTime, endTime)
+
+
+// Get time chart of cores
+AKSHourlyConsumedCores | where DesiredPowerState == 'Running'
+| summarize sum(cores) by hour, Environment
+| render timechart 
+
+// get AKS cores consumed 2 hours ago
+let endTime = todatetime(strcat(format_datetime(ago(2h), 'yyyy-M-d H'), ":00:00Z"));
+cluster('aks').database('AKSprod').getHourlyServiceTreeConsumedCores(3d, endTime)
+| where DesiredPowerState == 'Running'
+| summarize sum(cores) by hour, Environment
+| render timechart with (xcolumn=hour, ycolumns=sum_cores, series=Environment)
+
+cluster('aks').database('AKSprod').getServiceTreeConsumedCores(1h, ago(2h)) //, 'd404f07a-ff20-4680-b4b7-c8615f0b9b6d' // upstream service tree id
+| where DesiredPowerState == 'Running' and Environment == 'NonProd'
+| summarize sum(cores) by SubscriptionName 
+| sort by sum_cores desc
+
+cluster('aks').database('AKSprod').getHourlyServiceTreeConsumedCores(7d, ago(2h))
+| where DesiredPowerState == 'Running' and Environment == 'NonProd'
+| summarize sum(cores) by hour
+| render timechart 
+
+cluster('aks').database('AKSprod').getServiceTreeConsumedCores(1h, ago(2h))
+| where DesiredPowerState == 'Running' and Environment == 'NonProd'
+| summarize sum(cores)
+
+// 1 day ago
+getServiceTreeConsumedCores(1h, ago(1d)) | where DesiredPowerState == 'Running'
+| summarize sum(cores) by Environment
+
+// 2 day ago
+getServiceTreeConsumedCores(1h, ago(2d)) | where DesiredPowerState == 'Running'
+| summarize sum(cores) by Environment
+
+
+/////////////////////////////////////////////////////////
+// Function saved in aks.AKSprod
+// Get total cores consumed by AKS from both VM and VMSS
+/////////////////////////////////////////////////////////
+.create-or-alter function with (
+  folder = "prod", 
+  docstring = "Get hourly VM and VMSS cores consumed by a given service tree Id between [starttime, endtime). Time is aligned to hour. Default to AKS service tree. \n cluster('azcrpbifollower').database('bi_allprod') reports VM data every half an hour.", 
+  skipvalidation = "false")
+getHourlyServiceTreeConsumedCores(starttime: datetime, endtime : datetime, serviceId : string='f1d1800e-d38e-41f2-b63c-72d59ecaf9c0') {
+//let serviceId = 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'. // 'd404f07a-ff20-4680-b4b7-c8615f0b9b6d' for upstream
+//let endtime = endofday(ago(1d));
+//let starttime = endtime - 2d;
+let VMSizes = datatable (VMSize:string, cores:int)
+[
+"Standard_D16s_v3", 16, 
+"Standard_D8s_v3", 8,
+"Standard_DS1_v2", 1,
+"Standard_D2s_v3", 2,
+"Standard_DS2_v2", 2,
+"Standard_D2_v2", 2,
+"Standard_DS3_v2", 4,
+"Standard_D4s_v3", 4,
+"Standard_D2_v3", 2,
+"Standard_D32s_v3", 32,
+"Standard_A1_v2", 1,
+"Standard_E8s_v3", 8,
+"Standard_DS4_v2", 8,
+"Standard_DS5_v2", 16,
+"Standard_D1_v2", 1,
+"Standard_F2s_v2", 2,
+"Standard_DS13_v2", 8,
+"Standard_F8s_v2", 8,
+"Standard_NC24s_v3", 24,
+"Standard_D3_v2", 4,
+"Standard_D4_v3", 4,
+"Standard_F16s_v2", 16,
+"Standard_DS2", 2,
+"Standard_F4s_v2", 4,
+"Standard_F4s", 4,
+"Standard_A3", 4,
+"Standard_B2s", 2,
+"Standard_DS1", 1,
+"Standard_DS13", 8,
+"Standard_F2s", 2,
+"Standard_F1s", 1,
+"Standard_DS14", 16,
+"Standard_NV6", 6,
+"Standard_DS12_v2", 4,
+"Standard_DS11_v2", 2,
+"Standard_B1s", 1,
+"Standard_B1ls", 1,
+"Standard_B4ms", 4,
+"Basic_A0", 4
+];
+let subids = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot 
+| where ServiceId == serviceId
+| distinct SubscriptionId;
+let subs = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot
+ | where ServiceId == serviceId
+ | project SubscriptionId, SubscriptionName, AzureCloud, Environment;
+let vms = cluster('azcrpbifollower').database('bi_allprod').VM
+ | where (PreciseTimeStamp >= starttime and PreciseTimeStamp < endtime)
+ | where SubscriptionId in (subids)
+ | summarize arg_max(PreciseTimeStamp, *) by Key, hour=bin(PreciseTimeStamp, 1h)
+ | join kind=leftouter subs on SubscriptionId
+ | join kind=leftouter VMSizes on VMSize
+ | project hour, Key, PreciseTimeStamp, SubscriptionId, SubscriptionName, AzureCloud, Environment, VMSize, cores, ResourceGroupName, VMName, VMId, DesiredPowerState, PIR_Sku;
+let vmss = (cluster('azcrpbifollower').database('bi_allprod').VMScaleSetModel
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids) 
+            | distinct SubscriptionId, ResourceGroupName, VMScaleSetName, VMSize, PIR_Sku
+            )
+  | join (cluster('azcrpbifollower').database('bi_allprod').VMScaleSetVMInstance
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids)
+            | summarize arg_max(PreciseTimeStamp, *) by Key, hour=bin(PreciseTimeStamp, 1h)
+            | project-rename VMId=VMScaleSetVMInstanceId
+          )
+  on SubscriptionId, ResourceGroupName, VMScaleSetName
+ | join kind=leftouter subs on SubscriptionId
+ | join kind=leftouter VMSizes on VMSize
+ | project hour, Key, PreciseTimeStamp, SubscriptionId, SubscriptionName, AzureCloud, Environment, VMSize, cores, ResourceGroupName, VMId, DesiredPowerState, PIR_Sku;
+union vms, vmss
+}
+
+//
+// Get cores reported at max time between endtime and endtime - duration
+//
+.create-or-alter function with (
+  folder = "prod", 
+  docstring = "Get VM and VMSS cores consumed by a given service tree Id between (endtime - duration, endtime]. Default to AKS service tree. \n cluster('azcrpbifollower').database('bi_allprod') reports VM data every half an hour.", 
+  skipvalidation = "false")
+getServiceTreeConsumedCores(duration: timespan, endtime : datetime, serviceId : string='f1d1800e-d38e-41f2-b63c-72d59ecaf9c0') {
+//let serviceId = 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'. // 'd404f07a-ff20-4680-b4b7-c8615f0b9b6d' for upstream
+//let endtime = endofday(ago(1d));
+let starttime = endtime - duration;
+let VMSizes = datatable (VMSize:string, cores:int)
+[
+"Standard_D16s_v3", 16, 
+"Standard_D8s_v3", 8,
+"Standard_DS1_v2", 1,
+"Standard_D2s_v3", 2,
+"Standard_DS2_v2", 2,
+"Standard_D2_v2", 2,
+"Standard_DS3_v2", 4,
+"Standard_D4s_v3", 4,
+"Standard_D2_v3", 2,
+"Standard_D32s_v3", 32,
+"Standard_A1_v2", 1,
+"Standard_E8s_v3", 8,
+"Standard_DS4_v2", 8,
+"Standard_DS5_v2", 16,
+"Standard_D1_v2", 1,
+"Standard_F2s_v2", 2,
+"Standard_DS13_v2", 8,
+"Standard_F8s_v2", 8,
+"Standard_NC24s_v3", 24,
+"Standard_D3_v2", 4,
+"Standard_D4_v3", 4,
+"Standard_F16s_v2", 16,
+"Standard_DS2", 2,
+"Standard_F4s_v2", 4,
+"Standard_F4s", 4,
+"Standard_A3", 4,
+"Standard_B2s", 2,
+"Standard_DS1", 1,
+"Standard_DS13", 8,
+"Standard_F2s", 2,
+"Standard_F1s", 1,
+"Standard_DS14", 16,
+"Standard_NV6", 6,
+"Standard_NC6", 6,
+"Standard_DS12_v2", 4,
+"Standard_DS11_v2", 2,
+"Standard_B1s", 1,
+"Standard_B1ls", 1,
+"Standard_B4ms", 4,
+"Basic_A0", 4
+];
+let subids = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot 
+| where ServiceId == serviceId
+| distinct SubscriptionId;
+let subs = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot
+ | where ServiceId == serviceId
+ | project SubscriptionId, SubscriptionName, AzureCloud, Environment;
+let vms = cluster('azcrpbifollower').database('bi_allprod').VM
+ | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+ | where SubscriptionId in (subids)
+ | summarize arg_max(PreciseTimeStamp, *) by Key
+ | join kind=leftouter subs on SubscriptionId
+ | join kind=leftouter VMSizes on VMSize
+ | project Key, PreciseTimeStamp, SubscriptionId, SubscriptionName, AzureCloud, Environment, VMSize, cores, ResourceGroupName, VMName, VMId, DesiredPowerState, PIR_Sku;
+let vmss = (cluster('azcrpbifollower').database('bi_allprod').VMScaleSetModel
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids) 
+            | distinct SubscriptionId, ResourceGroupName, VMScaleSetName, VMSize, PIR_Sku
+            )
+  | join (cluster('azcrpbifollower').database('bi_allprod').VMScaleSetVMInstance
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids)
+            | summarize arg_max(PreciseTimeStamp, *) by Key
+            | project-rename VMId=VMScaleSetVMInstanceId
+          )
+  on SubscriptionId, ResourceGroupName, VMScaleSetName
+ | join kind=leftouter subs on SubscriptionId
+ | join kind=leftouter VMSizes on VMSize
+ | project Key, PreciseTimeStamp, SubscriptionId, SubscriptionName, AzureCloud, Environment, VMSize, cores, ResourceGroupName, VMId, DesiredPowerState, PIR_Sku;
+union vms, vmss | extend endtime
+}
+
+
+// Get all entries for a VM instance, seems they report every 30 minutes.
+let endtime = endofday(ago(1d));
+let starttime = endtime - 4h;
+cluster('azcrpbifollower').database('bi_allprod').VMScaleSetVMInstance
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where Key == '/Subscriptions/fd79ceec-6232-4080-8c58-94fd9498e4d5/ResourceGroups/HCP-UNDERLAY-EASTUS2EUAP-SVC-2/VMScaleSets/K8S-MASTER-37S7V43KZF1YD/VMs/20'
+            | sort by PreciseTimeStamp desc 
+
+
+
+// Find out VMScaleSetModel that are not in VMScaleSetVMInstance
+let endtime = datetime(2020-03-29);
+let starttime = endtime - 1h;
+let subids = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot 
+| where ServiceId == 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'
+| distinct SubscriptionId;
+let subs = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot
+ | where ServiceId == 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'
+ | project SubscriptionId, SubscriptionName, AzureCloud, Environment;
+cluster('azcrpbifollower').database('bi_allprod').VMScaleSetVMInstance
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids)
+            | distinct SubscriptionId, ResourceGroupName, VMScaleSetName 
+| join kind=rightanti (cluster('azcrpbifollower').database('bi_allprod').VMScaleSetModel
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids) 
+            | summarize arg_max(PreciseTimeStamp, *) by Key
+) on SubscriptionId, ResourceGroupName, VMScaleSetName
+| join kind=inner subs on SubscriptionId
+| project Key, ResourceGroupName, VMScaleSetName 
+//| where not(Key contains 'K8S-AGENTAPI-')
+
+
+// VMSS model that has a name starting with K8S-AGENTAPI- 
+// These VMSS do no have instances
+// Jason Wilder confirmed
+let endtime = datetime(2020-03-29);
+let starttime = endtime - 1h;
+let subids = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot 
+| where ServiceId == 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'
+| distinct SubscriptionId;
+cluster('azcrpbifollower').database('bi_allprod').VMScaleSetModel
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids)
+            | summarize arg_max(PreciseTimeStamp, *) by Key
+| where Key contains 'K8S-AGENTAPI-'
+| project SubscriptionId, ResourceGroupName, VMScaleSetName
+
+// Get total cores used by AKS prod and non-prod using VM
+let VMSizes = datatable (VMSize:string, cores:int)
+[
+"Standard_D16s_v3", 16, 
+"Standard_D8s_v3", 8,
+"Standard_DS1_v2", 1,
+"Standard_D2s_v3", 2,
+"Standard_DS2_v2", 2,
+"Standard_D2_v2", 2,
+"Standard_DS3_v2", 4,
+"Standard_D4s_v3", 4,
+"Standard_D2_v3", 2,
+"Standard_D32s_v3", 32,
+"Standard_A1_v2", 1,
+"Standard_E8s_v3", 8,
+"Standard_DS4_v2", 8,
+"Standard_DS5_v2", 16,
+"Standard_D1_v2", 1,
+"Standard_F2s_v2", 2,
+"Standard_DS13_v2", 8,
+"Standard_F8s_v2", 8,
+"Standard_NC24s_v3", 24,
+"Standard_D3_v2", 4,
+"Standard_D4_v3", 4,
+"Standard_F16s_v2", 16,
+"Standard_DS2", 2,
+"Standard_F4s_v2", 4,
+"Standard_F4s", 4,
+"Standard_A3", 4,
+"Standard_B2s", 2,
+"Standard_DS1", 1,
+"Standard_DS13", 8,
+"Standard_F2s", 2,
+"Standard_F1s", 1,
+"Standard_DS14", 16,
+"Standard_NV6", 6,
+"Standard_DS12_v2", 4,
+"Standard_DS11_v2", 2,
+"Standard_B1s", 1,
+"Standard_B1ls", 1,
+"Standard_B4ms", 4,
+"Basic_A0", 4
+];
+let endtime = endofday(ago(1d));
+let starttime = endtime - 1h;
+let subids = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot 
+| where ServiceId == 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'
+| distinct SubscriptionId;
+let subs = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot
+ | where ServiceId == 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'
+ | project SubscriptionId, SubscriptionName, AzureCloud, Environment;
+let vms = cluster('azcrpbifollower').database('bi_allprod').VM
+ | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+ | where SubscriptionId in (subids)
+ | summarize arg_max(PreciseTimeStamp, *) by Key
+ | join kind=leftouter subs on SubscriptionId
+ | join kind=leftouter VMSizes on VMSize
+ | project Key, PreciseTimeStamp, SubscriptionId, SubscriptionName, AzureCloud, Environment, VMSize, cores, ResourceGroupName, VMName, VMId, DesiredPowerState, PIR_Sku;
+vms | summarize sum(cores) by Environment
+
+// Get total cores used by AKS prod and non-prod using VMSS
+let VMSizes = datatable (VMSize:string, cores:int)
+[
+"Standard_D16s_v3", 16, 
+"Standard_D8s_v3", 8,
+"Standard_DS1_v2", 1,
+"Standard_D2s_v3", 2,
+"Standard_DS2_v2", 2,
+"Standard_D2_v2", 2,
+"Standard_DS3_v2", 4,
+"Standard_D4s_v3", 4,
+"Standard_D2_v3", 2,
+"Standard_D32s_v3", 32,
+"Standard_A1_v2", 1,
+"Standard_E8s_v3", 8,
+"Standard_DS4_v2", 8,
+"Standard_DS5_v2", 16,
+"Standard_D1_v2", 1,
+"Standard_F2s_v2", 2,
+"Standard_DS13_v2", 8,
+"Standard_F8s_v2", 8,
+"Standard_NC24s_v3", 24,
+"Standard_D3_v2", 4,
+"Standard_D4_v3", 4,
+"Standard_F16s_v2", 16,
+"Standard_DS2", 2,
+"Standard_F4s_v2", 4,
+"Standard_F4s", 4,
+"Standard_A3", 4,
+"Standard_B2s", 2,
+"Standard_DS1", 1,
+"Standard_DS13", 8,
+"Standard_F2s", 2,
+"Standard_F1s", 1,
+"Standard_DS14", 16,
+"Standard_NV6", 6,
+"Standard_DS12_v2", 4,
+"Standard_DS11_v2", 2,
+"Standard_B1s", 1,
+"Standard_B1ls", 1,
+"Standard_B4ms", 4,
+"Basic_A0", 4
+];
+let endtime = endofday(ago(1d));
+let starttime = endtime - 1h;
+let subids = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot 
+| where ServiceId == 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'
+| distinct SubscriptionId;
+let subs = cluster('datastudiostreaming').database('Shared').DataStudio_ServiceTree_AzureSubscription_Snapshot
+| where ServiceId == 'f1d1800e-d38e-41f2-b63c-72d59ecaf9c0'
+| project SubscriptionId, SubscriptionName, AzureCloud, Environment;
+let vmss = (cluster('azcrpbifollower').database('bi_allprod').VMScaleSetModel
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids) 
+            | distinct SubscriptionId, ResourceGroupName, VMScaleSetName, VMSize, PIR_Sku
+            //| summarize arg_max(PreciseTimeStamp, *) by Key | project-away PreciseTimeStamp, Key
+            )
+  | join (cluster('azcrpbifollower').database('bi_allprod').VMScaleSetVMInstance
+            | where (PreciseTimeStamp > starttime and PreciseTimeStamp <= endtime)
+            | where SubscriptionId in (subids)
+            | summarize arg_max(PreciseTimeStamp, *) by Key
+            | project-rename VMId=VMScaleSetVMInstanceId
+          )
+  on SubscriptionId, ResourceGroupName, VMScaleSetName
+ | join kind=leftouter subs on SubscriptionId
+ | join kind=leftouter VMSizes on VMSize
+ | project Key, PreciseTimeStamp, SubscriptionId, SubscriptionName, AzureCloud, Environment, VMSize, cores, ResourceGroupName, VMId, DesiredPowerState, PIR_Sku;
+vmss | summarize sum(cores) by SubscriptionName, Environment
+| sort by sum_cores desc
+
+
+
+print format_datetime(datetime(2015-12-14 02:03:04.12345), 'y-M-d h:m:s.fffffff')
+
+print todatetime(strcat(format_datetime(ago(2h), 'yyyy-M-d H'), ":00:00Z"))

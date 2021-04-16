@@ -1,0 +1,15 @@
+﻿cluster('ArmProd').database('ARMProd').HttpOutgoingRequests
+| where TIMESTAMP between ((datetime(2019-08-27 00:10:00)) .. (datetime(2019-08-27 00:30:00)) )
+    and httpStatusCode == 500
+    and operationName == 'GET/SUBSCRIPTIONS/RESOURCEGROUPS/PROVIDERS/MICROSOFT.CONTAINERSERVICE/MANAGEDCLUSTERS/'
+    and hostName == 'acs-eastus.trafficmanager.net'
+| join kind = inner (
+    FrontEndContextActivity
+    | where TIMESTAMP between ((datetime(2019-08-27 00:00:00)) .. (datetime(2019-08-27 00:50:00)) )
+        and operationName contains "GetManagedClusterHandler.GET"
+        and level == "error"
+) on $left.correlationId == $right.correlationID
+| summarize ImpactedSubscriptions = dcount(subscriptionId) by msg = substring(msg, 0, 100)
+| order by ImpactedSubscriptions desc
+
+

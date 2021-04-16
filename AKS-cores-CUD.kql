@@ -1,0 +1,102 @@
+﻿let AnalysisDate = startofday(ago(2d))
+;
+let CUDMissing = cluster("accia").database("CUD").ComputeUsage_Daily 
+| where Timestamp >= AnalysisDate and Timestamp < AnalysisDate + 1d
+| where IsCrp and isempty(DeallocationTime)
+| where isempty(ResourceGroupName) and isempty(Extensions)
+| where RoleInstance !contains "AzureBatch" and RoleInstance !contains 'pps-vm' and isnotempty(RoleInstance)
+| summarize TotalCores = sum(QuantityCores) by Timestamp,  VMId, CRPVMId, SubscriptionId, RoleInstance, Location, Os, OsType
+;
+let VMScaleSetVMInstanceData = 
+cluster("azcrpbifollower").database("bi_allprod").VMScaleSetVMInstance 
+    | where startofday(TIMESTAMP) == AnalysisDate
+    | summarize by VMScaleSetName, ResourceGroupName, SubscriptionId,CRPVMId=VMScaleSetVMInstanceId
+;
+let VMScaleSetModelData = 
+cluster("azcrpbifollower").database("bi_allprod").VMScaleSetModel 
+    | where startofday(TIMESTAMP) == AnalysisDate
+    | summarize by VMScaleSetName, ResourceGroupName, SubscriptionId, VMScaleSetId
+;
+let VMScaleSetExtensionData = 
+cluster("azcrpbifollower").database("bi_allprod").VMScaleSetVMExtension 
+    | where startofday(TIMESTAMP) == AnalysisDate
+    | where Publisher contains "Microsoft.AKS"
+    | where Type contains "Compute.AKS.Linux.Billing" or Type contains "Compute.AKS.Windows.Billing"
+    | summarize by VMScaleSetName, ResourceGroupName, SubscriptionId, VMScaleSetId,  Publisher,Type
+    | extend Extension = strcat(Publisher,".",Type)
+;
+let combinedVM = 
+VMScaleSetVMInstanceData
+| join kind = leftouter VMScaleSetModelData on VMScaleSetName, ResourceGroupName, SubscriptionId
+| join kind = leftouter VMScaleSetExtensionData on VMScaleSetId
+;
+let CUDworkaround = CUDMissing
+| join kind = leftouter (
+    combinedVM
+    )  on CRPVMId,SubscriptionId
+| where isnotempty(Extension)
+| project VMId, CRPVMId, RoleInstance, SubscriptionId, VMScaleSetName, ResourceGroupName, TotalCores, Timestamp, Location, Os, OsType
+| extend SubscriptionGuid = SubscriptionId
+| join kind= inner   
+(
+    cluster('accia.kusto.windows.net').database("CommonDims").Dim_CustomerSubscription
+    | where AccountTypeFlag == "External"
+    | project SubscriptionGuid, AccountTypeFlag, Customer
+)
+on SubscriptionGuid
+| join kind=inner
+(
+    cluster('accia.kusto.windows.net').database("CommonDims").Dim_Subscription
+    | where OfferType in ("Consumption", "CSP", "EA", "Monetary Commitment", "Open", "Government", "Modern")
+    | project SubscriptionGuid, OfferType, TPId
+)
+on SubscriptionGuid
+| summarize 
+    sum_TotalCores = sum(TotalCores)
+    by 
+    Timestamp=AnalysisDate,
+    Customer,
+    TPId,
+    AccountTypeFlag, 
+    OfferType,
+    ContainerOrchestrator="aks",
+    Location,
+    Os,
+    OsType  
+;
+let CUDavailable = cluster("accia").database("CUD").ComputeUsage_Daily 
+| where Timestamp == AnalysisDate 
+| where (Extensions contains "Microsoft.AKS.Compute.AKS.Linux.Billing" or Extensions contains "Microsoft.AKS.Compute.AKS.Windows.Billing")
+| summarize 
+    TotalCores = sum(QuantityCores) 
+    by 
+    Timestamp, 
+    SubscriptionId, 
+    ContainerOrchestrator, 
+    Location, 
+    Os, 
+    OsType
+| join kind= inner 
+(
+    cluster('accia.kusto.windows.net').database("CommonDims").Dim_CustomerSubscription
+    | where AccountTypeFlag == "External"
+    | project SubscriptionGuid, AccountTypeFlag, Customer
+)
+on $left.SubscriptionId == $right.SubscriptionGuid
+| join kind=leftouter
+(
+    cluster('accia.kusto.windows.net').database("CommonDims").Dim_Subscription
+    | where OfferType in ("Consumption", "CSP", "EA", "Monetary Commitment", "Open", "Government", "Modern")
+    |project SubscriptionGuid, OfferType, TPId
+)
+on $left.SubscriptionId == $right.SubscriptionGuid
+| summarize sum(TotalCores) by Timestamp, Customer, TPId, AccountTypeFlag, OfferType, ContainerOrchestrator, Location, Os, OsType
+;
+CUDworkaround 
+| union CUDavailable
+| where Os  != "Unknown"
+| summarize sum_TotalCores = sum(sum_TotalCores)
+    by 
+    Timestamp ,
+    Os
+| order by Timestamp, sum_TotalCores;  

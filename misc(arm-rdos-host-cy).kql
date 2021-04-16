@@ -1,0 +1,225 @@
+
+
+/////////////////////////
+// JIT audit
+/////////////////////////
+cluster('azureslam').database('JIT').Audit
+| where TIMESTAMP > ago(7d)
+| where UserIdentity in ('qike@ame.gbl', 'weinongw@ame.gbl')
+
+/////////////////////////
+// ARM
+/////////////////////////
+
+
+// Query resource table in ARM
+// For ACS v1 resources
+cluster('armprod').database("CosmosToKusto").ResourcesTable
+| summarize max(SnapshotDate)
+| join ResourcesTable on $left.max_SnapshotDate==$right.SnapshotDate
+| where ResourceId contains "Microsoft.ContainerService/containerService"
+| distinct SubscriptionId, ResourceGroupName, ResourceId
+
+union cluster('armprod').database('ARMProd').HttpIncomingRequests, 
+      cluster('armprod').database('ARMProd').HttpOutgoingRequests
+| where TIMESTAMP between (datetime(2019-09-03)..ago(1d))
+| where httpStatusCode <> -1
+| where operationName == "PUT/SUBSCRIPTIONS/RESOURCEGROUPS/PROVIDERS/MICROSOFT.CONTAINERSERVICE/MANAGEDCLUSTERS/"
+| where exceptionMessage contains "A task was canceled"
+| where subscriptionId == "b0d50d34-4247-4cae-871a-6b1799907b8d"
+| count 
+
+union cluster('armprod').database('ARMProd').HttpIncomingRequests, 
+      cluster('armprod').database('ARMProd').HttpOutgoingRequests
+| where TIMESTAMP > ago(5d)
+| where httpStatusCode <> -1
+| where operationName == "PUT/SUBSCRIPTIONS/RESOURCEGROUPS/PROVIDERS/MICROSOFT.CONTAINERSERVICE/MANAGEDCLUSTERS/"
+| where exceptionMessage contains "allocationfailure"
+| take 1 
+
+
+union cluster('armprod').database('ARMProd').HttpIncomingRequests, 
+      cluster('armprod').database('ARMProd').HttpOutgoingRequests
+| where TIMESTAMP > ago(5d)
+| where httpStatusCode == 429
+| where subscriptionId == '13b78706-0ca6-42fe-9dee-7a05c0396391'
+| where operationName == "PUT/SUBSCRIPTIONS/RESOURCEGROUPS/PROVIDERS/MICROSOFT.NETWORK/NETWORKSECURITYGROUPS/SECURITYRULES/"
+| where targetUri contains 'rbac1'
+| project TIMESTAMP, targetUri, userAgent, referer, additionalProperties, hostName, principalOid, clientApplicationId, clientIpAddress
+
+| summarize count() by userAgent
+
+cluster('armprod').database('ARMProd').Errors
+| where TIMESTAMP  > ago(1d)
+| where exception contains "allocationfailure"
+
+// Storage failures
+cluster('armprod').database('ARMProd').Errors
+| where Role == "StorageOperations.Replicator.Platform.razzle"
+| where TIMESTAMP  > ago(1d)
+| where exception contains "The remote server returned an error: (503) Server Unavailable."
+| summarize count() by bin(TIMESTAMP, 10m)
+| render  timechart 
+
+cluster('armprod').database('ARMProd').Errors
+| where Role == "StorageOperations.Replicator.Platform.razzle"
+| where TIMESTAMP  > ago(1d)
+
+//Replace XXXX below with your namespace value in lowercase
+//Change the period to what you desire but note that the query will time out if you choose a large time period
+cluster('armprod').database('ARMProd').OutgoingRequestsToRP_V2(ago(15m), now())
+    | extend regionType = getRegionType(Provider, hostName, subscriptionId, targetUri)
+    | where Provider == "microsoft.containerservice"
+    | summarize
+    TotalRequest=count(),
+    Success = countif(httpStatusCode >= 200 and httpStatusCode < 400),
+    ServerFailure=countif(httpStatusCode == 408 or httpStatusCode >= 500),
+    ClientFailure=countif(httpStatusCode >= 400 and httpStatusCode < 500 and httpStatusCode != 408),
+    CanaryCount = countif(regionType=='Canary'),
+    ProdCount = countif(regionType=='Prod'),
+    TestCount = countif(regionType== 'Test')
+    by
+    bin(TIMESTAMP, 1d), Provider, operationName, apiVersion, regionType, PotentialNoise  
+    | where PotentialNoise != 1
+| project 
+    OperationName = operationName,
+    Provider, 
+    APIVersion = apiVersion,
+    TIMESTAMP,
+    Region = regionType,
+    TotalRequest,
+    Success,
+    ServerFailure,
+    ClientFailure,
+    CanaryCount,
+    ProdCount,
+    TestCount
+
+// Get error message for an ARM call in Async path
+cluster('armprod').database('ARMProd').EventServiceEntries 
+| where TIMESTAMP > ago(2h)
+| where subscriptionId == 'c4c3550e-a965-4993-a50c-628fd38cd3e1'
+| where status == "Failed"
+| project statusmessage = parse_json(properties).statusMessage 
+| extend innerstatus = parse_json(tostring(parse_json(tostring(statusmessage)).error)).code, parse_json(tostring(statusmessage)).code  
+| extend message = parse_json(tostring(parse_json(tostring(statusmessage)).error)).message, parse_json(tostring(statusmessage)).message
+
+// Get not found errors for listClusterUserCredential action
+cluster('armprod').database('ARMProd').EventServiceEntries 
+| where TIMESTAMP >= ago(7d) 
+| where resourceProvider =~ "Microsoft.ContainerService" 
+| where operationName =~ "Microsoft.ContainerService/managedClusters/listClusterUserCredential/action" 
+| where subStatus =~ "NotFound"  
+| extend statusmessage = parse_json(properties).statusMessage 
+| extend innerstatus = iif(parse_json(tostring(statusmessage)).code=="", parse_json(tostring(parse_json(tostring(statusmessage)).error)).code, parse_json(tostring(statusmessage)).code)  
+| extend message = iif(parse_json(tostring(statusmessage)).message=="", parse_json(tostring(parse_json(tostring(statusmessage)).error)).message, parse_json(tostring(statusmessage)).message) 
+| where innerstatus =~ "ResourceGroupNotFound" or innerstatus =~ "ResourceNotFound"  
+| join (
+    HttpIncomingRequests 
+    | where TIMESTAMP > ago(7d) 
+    | where authorizationAction  =~ "Microsoft.ContainerService/managedClusters/listClusterUserCredential/action" ) 
+  on correlationId 
+| summarize count() by failureCause 
+
+
+//////////////////////
+// vmainsight, VMALENS
+/////////////////////
+
+// VM down state
+ let start = datetime(5/20/2020);
+ let end = now();
+  cluster('vmakpi').database('vmadb').VMALENS
+| where StartTime between (start .. end)
+| where LastKnownSubscriptionId == '30a25c0e-1b63-4aa3-9240-834cf5725970' and AvailabilityState == 'Down'
+| project StartTime, Cluster, NodeId, TenantId, ContainerId, ResourceId, LastKnownSubscriptionId, RCALevel2
+
+// Get all node state transitions for a host
+// OneFleet Node
+let host="fd35cbc3-b300-4599-a7f4-9a9da73e148e";
+cluster('vmainsight').database('vmadb').NodeStateTransitions
+| where NodeId == host
+
+//////////////////////
+// rdos. https://rdos.kusto.windows.net/rdos 
+// vm instance health and host health
+/////////////////////
+
+//
+// writeback blips (High Io latencies)
+//
+let startTime = ago(60d);
+let endTime = ago(1h);
+cluster('Vmakpi').database('Air').AirDiskIOBlipEvents
+| where EventTime between (startTime .. endTime)
+| where BlackoutRCA contains "Blackouts.Xstore.Writeback.Writeback"
+| summarize WriteBackNodeCount = dcount(NodeId), WriteBackVmCount = dcount(ContainerId) by bin(EventTime, 1d) //, BlackoutRCA
+
+
+cluster('rdos').database('rdos').ImdsApiRequests(12h)
+| where Container == "66afd627-d212-44e3-abb5-cc09775b7b58"
+
+cluster('rdos').database('rdos').NodeServiceEventEtwTable 
+| where NodeId == "67e79876-927a-4c42-b0a4-08319e5f3a04" or NodeId == "1cbf5903-f3b5-4bdc-b575-7d3e29225b77"
+| where Message contains "StorageBlobLeasePending"
+| where PreciseTimeStamp > ago(1d)
+| project PreciseTimeStamp, Message
+
+cluster('rdos').database('rdos').NodeServiceEventEtwTable 
+| where Message contains "StorageBlobLeasePending"
+| where PreciseTimeStamp > ago(10h)
+| where Cluster contains "AM5PrdApp36"
+| parse Message with "Container[" containerId "]" *
+| summarize by containerId
+| join cluster('azurecm.kusto.windows.net').database('AzureCM').LogContainerHealthSnapshot on containerId
+| where containerState !contains "ContainerStateStarted" 
+| summarize by containerId, containerState
+
+// Get health issue for one vm
+// vmid is called: ContainerId
+cluster('rdos').database('rdos').VmHealthRawStateEtwTable
+| where ContainerId == "fed82c78-f48d-419a-9238-c253fbcd15eb"
+| where PreciseTimeStamp > ago(12h)
+
+
+/////////////////////////////////////////////////////////////////////////////////////
+// vmainsight: host and vm runtime info
+/////////////////////////////////////////////////////////////////////////////////////
+
+// Get all node state transitions for a host
+// OneFleet Node
+let host="fd35cbc3-b300-4599-a7f4-9a9da73e148e";
+cluster('vmainsight').database('vmadb').NodeStateTransitions
+| where NodeId == host
+
+// Check host (bare metal) CPU usage
+cluster('vmainsight').database('vmadb').HighCpuCounterNodeTable
+| where NodeId == "33395e2a-f188-42e2-a9a3-6dd21a08453c"
+    and PreciseTimeStamp > datetime(2019-09-24 00:00:00) 
+    and PreciseTimeStamp < datetime(2019-09-26 23:59:59)
+
+cluster('vmainsight').database('vmadb').VMA
+| take 1
+
+
+
+//////////    AzureCM        //////////////
+cluster('azurecm').database('AzureCM').NodeStateChangeDurationDetails
+| where PreciseTimeStamp >=  ago(2d) 
+| where [@'nodeId'] == @'33395e2a-f188-42e2-a9a3-6dd21a08453c'
+
+// Map from vmname to vmid, nodeid etc.
+// Find vmid (called ContainerId) from vm name (called: roleInstanceName)
+cluster('azurecm').database('AzureCM').LogContainerSnapshot
+| where tenantName contains "1d5017fa-c73d-4db3-92a8-192c896a486a"
+| where roleInstanceName contains "k8s-master-18879312-1"
+| where PreciseTimeStamp > ago(3d)
+| summarize arg_max(PreciseTimeStamp, *) by containerId
+//| project containerId, roleInstanceName
+
+
+
+
+
+
+

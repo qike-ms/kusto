@@ -1,0 +1,410 @@
+﻿// FILE NAME: AKS-debug.kql 
+//
+// To debug a customer cluster
+//===================================================
+// Get the cluster's underlay from kusto:  https://dataexplorer.azure.com/clusters/aks/databases/AKSprod  using corp account
+
+//=================================
+//  RUNTIME
+//=================================
+
+// Data issue to fix in Data Plane
+// 1. Log node where the pods running on in BBM
+// 2. log details when remediation succeeded
+// 3. log node that got restarted in remediation
+// SLI: 
+// 1. Clearly AKS fault: underlay issue or CCP chart issue
+// 2. Clearly customers fault: OOMKilled pods, error pods, resource overcommitted, AKS cluster version falling out of support
+// 3. Grey area: could be customer's fault, could be AKS issue. Alert on sudden jump of this per region, to detect rollout issues and stop rollout.
+// 4. On demand continer insight! collect logs for a given set of pods and metrics for a set of pods during a period of debugging
+
+
+//===========================================
+//   BBM
+//===========================================
+
+// Project useful fields from BBM table for a cluster
+let subId = '9b491dd6-598e-498c-98a0-d3bbd2290821';
+let rg = 'rg-hk01-eas-p-infrasvc01-cont01';
+let c = 'aks-hk01-eas-p-infrasvc01-cu01';
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+|where TIMESTAMP between(datetime(8/5/2020 00:04:00)..datetime(8/5/2020 00:12:59))
+| where subscriptionID == subId and resourceGroupName == rg and clusterName == c
+| project TIMESTAMP, UnderlayName, ccpNamespace, msg, annotations, fqdn, k8sCurrentVersion, 
+          apiserverCPU, apiserverMemory, etcdCPU, etcdMemory, 
+          vmSkus, agentNodeCount, customerPodCount, kubeSystemPodCount, totalAgentCores, 
+          underlayKubernetesVersion, underlayOSImage, apiServerUnderlayNode, 
+          isAzureCNI, networkProfile, serviceCount, ingressesCount, ccpIP, isCustomVnet, clusterBirthdate, totalPersistentVolumeCount
+
+
+
+////////    DEBUG CPU, MEMORY usage of CCPs for a given cluster    ///////////////////////////
+
+// /sub/b99f1e89-1116-4623-ae61-59be07a79353/rg/stradigi-azureprod-ca-central/c/stradigi-azureprod-ca-central
+// /sub/b00f7b88-d53f-4a08-a642-94bec734db10/rg/stradigi-azuredev-ca-central/c/stradigi-azuredev-ca-central
+// Get ccpNamespace to get CCP events
+let subId = 'b99f1e89-1116-4623-ae61-59be07a79353';
+let rg = 'stradigi-azureprod-ca-central';
+let c = 'stradigi-azureprod-ca-central';
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+|where TIMESTAMP > ago(3d)
+| where subscriptionID == subId and clusterName == c
+| take 1
+| project TIMESTAMP, UnderlayName, ccpNamespace, msg, annotations, fqdn, k8sCurrentVersion, 
+          apiserverCPU, apiserverMemory, etcdCPU, etcdMemory, 
+          vmSkus, agentNodeCount, customerPodCount, kubeSystemPodCount, totalAgentCores, 
+          underlayKubernetesVersion, underlayOSImage, apiServerUnderlayNode, 
+          isAzureCNI, networkProfile, serviceCount, ingressesCount, ccpIP, isCustomVnet, clusterBirthdate, totalPersistentVolumeCount
+
+
+let FQDN = 'aks-20wk34-l1-20200821-k8s-172a502f.hcp.eastus2.azmk8s.io';  // Morgan Stanley
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+|where TIMESTAMP > ago(1d)
+| where fqdn == FQDN
+| take 1
+| project TIMESTAMP, subscriptionID, clusterName,
+          UnderlayName, ccpNamespace, msg, annotations, fqdn, k8sCurrentVersion, 
+          apiserverCPU, apiserverMemory, etcdCPU, etcdMemory, 
+          vmSkus, agentNodeCount, customerPodCount, kubeSystemPodCount, totalAgentCores, 
+          underlayKubernetesVersion, underlayOSImage, apiServerUnderlayNode, 
+          isAzureCNI, networkProfile, serviceCount, ingressesCount, ccpIP, isCustomVnet, clusterBirthdate, totalPersistentVolumeCount
+// ccpNamespace = '5f409a76e74f060001d2fac4'
+
+
+// Get CPU and memory chart
+let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+|where TIMESTAMP between (datetime('2020-08-30T06:16')..datetime('2020-09-01T00:33'))
+| where ccpNamespace == ccpNS
+| project TIMESTAMP,  apiMemMeg = apiserverMemory / 1000000., //apiserverCPU, etcdCPU, etcdMemMeg = etcdMemory / 1000000., 
+  customerPodCount, totalAgentCores
+| render timechart 
+
+print now()
+
+let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+|where TIMESTAMP between (datetime('2020-08-29T16:16')..datetime('2020-08-31T17:33'))
+| where ccpNamespace == ccpNS
+| where customerPodCount == 0 and apiserverMemory > 5000000000
+| project TIMESTAMP,  apiserverCPU, apiMemMeg = apiserverMemory / 1000000., etcdCPU, etcdMemMeg = etcdMemory / 1000000., 
+//| distinct 
+    customerPodCount, totalAgentCores, kubeSystemPodCount,
+    ['state'], supportedState, addonPodsState, componentsPodsState, podsState, resourceState, msg
+
+
+//| sort by TIMESTAMP desc 
+
+
+// BUGBUG: why api server is considered healthy when it could not get any pods, even system pods?
+//let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+|where TIMESTAMP > ago(3d)
+//| where ccpNamespace == ccpNS
+| where kubeSystemPodCount == 0 and totalAgentCores > 0 and ['state'] == 'Healthy' and resourceState != 'CustomerNodesPowerOff'
+| project TIMESTAMP, customerPodCount, totalAgentCores, kubeSystemPodCount, ['state'], supportedState, addonPodsState, componentsPodsState, podsState, resourceState
+| take 10
+
+////////  END:  DEBUG CPU, MEMORY usage of CCPs for a given cluster    ///////////////////////////
+
+
+//
+// Get BBM events during given time range
+//
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+| where TIMESTAMP between(datetime(2020-04-23).. datetime(2020-04-23T01:15:00))   // optimization to return faster
+| where resourceGroupName == 'aks-prd-1-rg' and clusterName == 'k8s-prd-1'
+| where region == 'brazilsouth' and subscriptionID == '30a25c0e-1b63-4aa3-9240-834cf5725970'   // optimization to return faster
+| project TIMESTAMP, Underlay, UnderlayName, ccpNamespace, fqdn, k8sCurrentVersion, msg, 
+                    apiserverCPU, apiserverMemory, etcdCPU, etcdMemory, vmSkus, agentNodeCount, customerPodCount, kubeSystemPodCount, totalAgentCores, 
+                    underlayKubernetesVersion, underlayOSImage, 
+                    isAzureCNI, networkProfile, serviceCount, ingressesCount, ccpIP, isCustomVnet, 
+                    clusterBirthdate, apiServerUnderlayNode, totalPersistentVolumeCount, annotations
+
+//
+// Get cluster details from resourceGroupName and cluster name
+//
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+| where TIMESTAMP between(datetime(2020-04-23).. datetime(2020-04-23T01:15:00))   // optimization to return faster
+| where resourceGroupName == 'aks-prd-1-rg' and clusterName == 'k8s-prd-1'
+| where region == 'brazilsouth' and subscriptionID == '30a25c0e-1b63-4aa3-9240-834cf5725970'  // Netshoes sub id
+| summarize arg_max(TIMESTAMP, Underlay, UnderlayName, ccpNamespace, fqdn, k8sCurrentVersion, msg, 
+                    apiserverCPU, apiserverMemory, etcdCPU, etcdMemory, vmSkus, agentNodeCount, customerPodCount, kubeSystemPodCount, totalAgentCores, 
+                    underlayKubernetesVersion, underlayOSImage, 
+                    isAzureCNI, networkProfile, serviceCount, ingressesCount, ccpIP, isCustomVnet, 
+                    clusterBirthdate, apiServerUnderlayNode, totalPersistentVolumeCount, annotations) by region, subscriptionID, resourceGroupName, clusterName
+
+
+
+//
+// Get cluster configuration details as well as ccpNamespace from resourceGroupName and cluster name
+//
+cluster('aks').database('AKSprod').ManagedClusterMonitoring
+| where resourceGroupName == 'aks-prd-1-rg' and resourceName == 'k8s-prd-1'
+| summarize arg_max(TIMESTAMP, hcpControlPlaneID, msg) by region, subscriptionID, resourceGroupName, resourceName
+
+//
+// Get underlay info based on hcpControlPlaneID returned above
+// Not ready
+//
+cluster('aks').database('AKSprod').AKSClusterMetrics
+| where TIMESTAMP > ago(1d)
+| distinct namespace
+| count 
+
+
+
+// Get all remediation for a cluster in last 1 day
+let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley
+cluster('aks').database('AKSprod').RemediatorEvent
+| where TIMESTAMP > ago(5d)
+| where ccpNamespace == ccpNS
+| where ['state'] == 'Unhealthy'
+| project-away fileName, hcpURL, level, lineNumber, msg, serviceBuild, source, traceId, pod, namespace, containerID, container, FluentdIngestTimestamp, RPSector, RPTenant, Service, Host, SourceNamespace, SourceMoniker, SourceVersion, Cloud, Environment, correlationID, statusCode
+//| take 1
+//| distinct hostMachine
+
+let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+cluster('aks').database('AKSprod').RemediatorEvent
+//| where TIMESTAMP > datetime('2020-04-28T12:50:00') and TIMESTAMP < datetime('2020-04-28T13:20:30')
+//| where region == 'brazilsouth' and subscriptionID == '30a25c0e-1b63-4aa3-9240-834cf5725970' 
+//| where TIMESTAMP > datetime('2020-04-28T18:00:00') and TIMESTAMP < datetime('2020-04-28T18:20:30') 
+| where TIMESTAMP > ago(3d)
+| where ccpNamespace == ccpNS
+| where remediation == 'restartAgentNodeKubeProxy'
+| where state == 'Unhealthy'
+//| where correlationID == '65d3f42f-3c8f-4621-b0fb-a988e32b883f'
+| project logPreciseTime, msg, Underlay, reason, remediation, ['state'], statusCode, correlationID
+//| join BlackboxMonitoringActivity on correlationID
+| sort by logPreciseTime desc
+
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+| where correlationID == '65d3f42f-3c8f-4621-b0fb-a988e32b883f'
+| project TIMESTAMP, logPreciseTime, msg
+| sort by logPreciseTime desc
+
+
+
+
+//====================================
+// CCP Events
+//====================================
+
+// Get API server request latency
+let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp >= ago(24h)
+| where ccpNamespace == ccpNS
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))
+| where event.stage == "ResponseComplete"
+| where event.verb != "watch"
+| where event.responseStatus.code == "200"
+// | where event.user.username == "system:serviceaccount:kube-system:kube-proxy"
+// | where event.user.username == "nodeclient"
+| extend lat=datetime_diff('Millisecond', todatetime(event.stageTimestamp), todatetime(event.requestReceivedTimestamp))
+| summarize percentiles(lat, 99, 90, 50) by tostring(event.verb)
+
+
+/////////////////////////////////////////////////
+// Get pod termination for a customer's cluster
+/////////////////////////////////////////////////
+// CCP OOMKilled Events with details parsed out
+cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp between (datetime(2020-08-12).. datetime(2020-08-12T18:15:00))
+| where ccpNamespace == "5e66748a3c8b9d00010bded7"      // Customer cluster's ccp  id
+| where properties contains  "OOMKilled"  // "terminated" //
+| extend log=parse_json(tostring(parse_json(parse_json(properties).log)))
+| extend cs=log.requestObject.status.containerStatuses[0]
+//| where cs.lastState.terminated.reason != ""
+| project PreciseTimeStamp, reason=cs.lastState.terminated.reason, exitcode=cs.lastState.terminated.exitCode
+          , cs.image, pod = log.objectRef.name, ns=log.objectRef.namespace, cs.restartCount
+          , log.responseObject.spec, log.responseObject.spec.template.spec.containers[0].resources
+          , startedAt=cs.lastState.terminated.startedAt, finishedAt=cs.lastState.terminated.finishedAt, cs.lastState.terminated.message
+          , log.user.username, log.userAgent, log.requestURI, log.verb, log
+| sort by PreciseTimeStamp desc
+
+
+// Get events count by userAgent for given cluster
+let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp > ago(3d)
+| where properties contains "userAgent"
+| where ccpNamespace == ccpNS
+| extend p = parse_json(properties)
+| extend log = parse_json(tostring(p.log)) | extend username=tostring(log.user.username), userAgent=tostring(log.userAgent)
+| summarize count() by bin(PreciseTimeStamp, 1h), userAgent | where count_ > 3600
+| render timechart 
+
+
+
+//=================================
+// CRUD CRUD CRUD
+//=================================
+
+
+// Morgan Stanley Sev1. Connectivity issue
+cluster("Aks").database("AKSprod").FrontEndContextActivity
+| where subscriptionID == "67fa1acb-7130-4a5d-a378-a423e340183e" and resourceName == "aks-20wk34-l1-20200821"
+//| where fqdn == "aks-20wk34-l1-20200821-k8s-172a502f.hcp.eastus2.azmk8s.io"
+| where PreciseTimeStamp > ago(1d)
+| where level !contains "info"
+| project PreciseTimeStamp, operationName, operationID, hostName, level, msg, pod, Underlay
+| order by PreciseTimeStamp asc
+
+
+
+let subId = "67fa1acb-7130-4a5d-a378-a423e340183e";  // Morgan Stanley cluster
+let c = "aks-20wk34-l1-20200821";
+cluster('aks').database('AKSprod').AsyncQoSEvents
+| where TIMESTAMP > ago(30d)
+| where subscriptionID == subId and resourceName  == c
+
+
+let subId = '13b78706-0ca6-42fe-9dee-7a05c0396391';
+let cluster = 'prober2';
+cluster('aks').database('AKSprod').FrontEndQoSEvents
+| where TIMESTAMP > ago(3d)
+| where subscriptionID == subId and suboperationName contains "Scal"
+| where not(serviceBuild contains "osa")
+//| where httpStatus != 200
+
+
+
+// Get latency of latency prober (create and delete basic 3 node clusters)
+let subId = '13b78706-0ca6-42fe-9dee-7a05c0396391';
+cluster('aks').database('AKSprod').AsyncQoSEvents
+| where subscriptionID == subId //and resourceGroupName == 'qike_eastus'
+//| where resourceName startswith 'prober'
+| project TIMESTAMP, minutes = latency/60000., suboperationName
+| render timechart with (ycolumns=minutes)
+
+
+let subId = '13b78706-0ca6-42fe-9dee-7a05c0396391';  // AKS Test
+let cluster = 'prober2';
+cluster('aks').database('AKSprod').AsyncContextActivity
+| where TIMESTAMP > ago(3d)
+| where subscriptionID == subId
+
+let subId = '13b78706-0ca6-42fe-9dee-7a05c0396391';
+let cluster = 'prober2';
+cluster('aks').database('AKSprod').FrontEndContextActivity
+| where TIMESTAMP > ago(3d)
+| where subscriptionID == subId and level != 'info'
+| where not(hostName contains "aro")
+
+
+//
+// Join AsyncQoSEvents and AsyncContextActivity to get all logs for one operation
+//
+let opid = 'ff82f372-1126-43c2-84e9-31a6c53ecda6';
+let activity = (
+      cluster('aks').database('AKSprod').AsyncContextActivity
+        | where operationID == opid
+        | project logPreciseTime, operationID, lineNumber, msg, fileName, level
+      );
+let qosevents = (
+      cluster('aks').database('AKSprod').AsyncQoSEvents
+        | where operationID == opid
+        | project operationID, correlationID, latency, operationName, propertiesBag, region, resourceName, resourceGroupName, resultCodeDependency, result, resultType, resultCode, resultSubCode, suboperationName, errorDetails, fqdn, subscriptionID
+      );
+activity | join kind=inner qosevents
+on operationID
+//| extend errorCode = extract("\"code\": \"(.*)\"", 1, msg)
+| sort by logPreciseTime asc 
+
+
+
+//
+// Join AsyncQoSEvents and AsyncContextActivity to get all logs
+//
+let endtime = todatetime(strcat(format_datetime(ago(2h), 'yyyy-M-d H'), ":00:00Z")); // datetime(2020-04-08T08:00);
+let starttime = endtime - 1d; //datetime(2020-04-07T20:00);
+let r = "norwaywest";
+let op = "Creating";
+let dep = "microsoft.compute/virtualmachinescalesets";
+cluster('aks').database('AKSprod').AsyncQoSEvents
+| where PreciseTimeStamp > starttime and PreciseTimeStamp < endtime
+//| where region == r
+| where suboperationName == op
+| where resultType != 0
+//| where resultCodeDependency == dep
+| project TIMESTAMP, result, resultType, resultCodeDependency, resultSubCode, resultCode, operationID
+| join (cluster('aks').database('AKSprod').AsyncContextActivity 
+       | where PreciseTimeStamp > starttime and PreciseTimeStamp < endtime  //| where msg contains "Reconcile vmss agent pool error:"
+       | project operationID, msg, resultCode, resultType)
+on operationID
+| extend errorCode = extract("\"code\": \"(.*)\"", 1, msg)   // Extract error code from msg from AsyncContextActivity
+| sort by operationID 
+| take 100
+
+
+//
+// Join AsyncQoSEvents and AsyncContextActivity to get
+// count per dependency, resultCode and error code from AsyncContextActivity msg field
+//
+let endtime = todatetime(strcat(format_datetime(ago(2h), 'yyyy-M-d H'), ":00:00Z"));
+let starttime = endtime - 1d;
+let r = "norwaywest";
+let op = "Creating";
+let dep = "microsoft.compute/virtualmachinescalesets";
+cluster('aks').database('AKSprod').AsyncQoSEvents
+| where PreciseTimeStamp > starttime and PreciseTimeStamp < endtime
+| where resultType != 0
+//| where region == r
+//| where suboperationName == op
+//| where resultCodeDependency == dep
+| project TIMESTAMP, result, resultType, resultCodeDependency, resultSubCode, resultCode, operationID, region, suboperationName
+| join (cluster('aks').database('AKSprod').AsyncContextActivity   // resultType in this table is completely useless!
+       | where PreciseTimeStamp > starttime and PreciseTimeStamp < endtime  //| where msg contains "Reconcile vmss agent pool error:"
+       | project operationID, msg, resultCode)
+on operationID
+| extend errorCode = extract("\"code\": \"(.*)\"", 1, msg)   // Extract error code from msg from AsyncContextActivity
+| extend err = strcat(resultCode, '_', resultSubCode)
+| summarize count=dcount(operationID) by t=bin(TIMESTAMP, 1h), region, err//, errorCode
+| render timechart with (xcolumn=t, ycolumns=count, series=region, err)
+
+
+
+/// Underlay issue debugging
+UnderlayNodeInfo
+| where PreciseTimeStamp > ago(1h)
+| summarize arg_max(PreciseTimeStamp, *) by VMID
+| distinct ResourceGroup, K8sVersion
+| where K8sVersion startswith "v1.15."
+| summarize count() by K8sVersion
+
+
+// ManagedClusterMonitoring
+ManagedClusterMonitoring
+| where TIMESTAMP > ago(2d)
+| project TIMESTAMP, subscriptionID, region, resourceGroupName, resourceName, Cloud, Environment, msg
+| distinct  subscriptionID, region, resourceGroupName, resourceName
+| count 
+
+ManagedClusterMonitoring
+| where msg contains "orchestratorProfile"
+//| where TIMESTAMP > ago(15m)
+| take 1
+//| project TIMESTAMP, subscriptionID, region, resourceGroupName, resourceName, Cloud, Environment, msg
+| extend p = parse_json(msg) | extend kc = p.containerService.properties.orchestratorProfile.kubernetesConfig
+| project msg, p, p.containerService, kc.networkPlugin, 
+          kc.containerRuntime, kc.privateCluster.enabled,
+          kc.enablePodSecurityPolicy, kc.addons, 
+          kc.azureCNIVersion,
+          p.nodeResourceGroup, p.sku.name, p.sku.tier, p.aadAdditionalProfile.adminGroupObjectIDs, // p.CloudProviderProfile, p.accessProfiles, p.LoadBalancerProfile, 
+          subscriptionID, region, resourceGroupName, resourceName, Cloud, Environment
+
+ 
+
+cluster('aks').database('AKSprod').AsyncQoSEvents
+| where TIMESTAMP > ago(7d)
+| summarize count() by resultType, bin(TIMESTAMP, 1h)
+
+cluster('aks').database('AKSprod').AsyncQoSEvents
+| where TIMESTAMP > ago(1h)
+| where resultSubCode == 'InternalOperationError'
+| take 1
+
+
+

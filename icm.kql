@@ -1,0 +1,282 @@
+//
+// Query used in CRI dashboard: https://jarvis-west.dc.ad.msft.net/dashboard/RPACS/AKS/CRI%2520Analysis
+//
+
+// AKS metadata:
+// Tenant:
+//   Name: Azure Kubernetes Service    Id: 22547   publicId: fc7c0ce5-b1cc-4d2e-9cc1-6feab21d71d0
+//   Name: EEEACS                      Id: 20251
+//
+// Teams:
+//   Name: AZURECONTAINERSERVICE\RP,  Id: 50381
+//   Name: AZUREKUBERNETESSERVICE\DataPlane,  Id: 65408
+//   Name: AZUREKUBERNETESSERVICE\ClusterUpgrade,  Id: 74060
+//   Name: AZUREKUBERNETESSERVICE\ContainerNetworking,  Id: 74066
+//   Name: AZUREKUBERNETESSERVICE\ClusterAutoscaler  Id: 74068
+///////////////////////////////////////////////////////////////////////
+
+
+//
+// Weekly Created CRI count
+//
+Incidents
+| where CreateDate > ago(730d)
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT" 
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| join ( 
+// CRIs every owned by AKS team or contains "CRI-AKS"
+Incidents 
+| where CreateDate > ago(730d)
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+| where Title has "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service"
+| distinct IncidentId
+) on IncidentId
+| where OwningTenantName != "Support" 
+| summarize dcount(IncidentId) by bin_at(CreateDate, 7d, endofweek(now()))
+| render timechart
+
+
+//
+// Get newly created CRIs that impacted AKS
+//
+Incidents 
+| where Lens_IngestionTime > ago(30d)
+| where CreateDate > ago(7d) 
+//| where CreateDate > datetime({startTime}) and CreateDate < datetime({endTime})
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT" 
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| join (
+    union ( IncidentHistory 
+    | where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+    | where Title contains "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service" or ImpactedServices contains '22547'  // Azure Kuberenetes Service
+    | distinct IncidentId )
+    , (
+    Incidents 
+    | where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+    | where Title has "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service"
+    | distinct IncidentId
+    )
+    | distinct IncidentId
+) on IncidentId
+| where OwningTenantName != "Support"  // Exclude JIT and IcMs still owned by EEE
+| summarize count() by OwningTenantName
+| sort by count_ desc
+//| project OwningTenantName, Title, url=strcat("https://portal.microsofticm.com/imp/v3/incidents/details/", IncidentId), HowFixed, MitigatedBy, TTM = toint((MitigateDate - CreateDate) / 1d), OwningTeamName, Mitigation, OwningContactAlias, Status, IncidentId, CreateDate, MitigateDate, Severity, CustomerName, RootCauseId, Keywords, SupportTicketId, SubscriptionId, Summary
+//| sort by MitigateDate desc
+
+
+
+//
+// Mitigated CRIs, Count by OwningTenantName
+//
+Incidents 
+| where Lens_IngestionTime > ago(30d)
+| where MitigateDate > ago(7d) 
+//| where MitigateDate > datetime({startTime}) and MitigateDate < datetime({endTime})
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT" 
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| join (
+    union ( IncidentHistory 
+    | where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+    | where Title contains "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service" or ImpactedServices contains '22547'  // Azure Kuberenetes Service
+    | distinct IncidentId )
+    , (
+    Incidents 
+    | where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+    | where Title has "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service"
+    | distinct IncidentId
+    )
+    | distinct IncidentId
+) on IncidentId
+| where OwningTenantName != "Support"  // Exclude JIT and IcMs still owned by EEE
+| summarize count() by OwningTenantName
+| sort by count_
+//| project OwningTenantName, Title, url=strcat("https://portal.microsofticm.com/imp/v3/incidents/details/", IncidentId), HowFixed, MitigatedBy, TTM = toint((MitigateDate - CreateDate) / 1d), OwningTeamName, Mitigation, OwningContactAlias, Status, IncidentId, CreateDate, MitigateDate, Severity, CustomerName, RootCauseId, Keywords, SupportTicketId, SubscriptionId, Summary
+//| sort by MitigateDate desc
+
+
+
+//
+// Mitigated CRIs by AKS team, Count by AKS Classification
+//
+Incidents
+// Get latest snapshot of any CRI that is not JIT
+| where Lens_IngestionTime > ago(30d)
+| where MitigateDate > ago(7d) 
+//| where MitigateDate > datetime({startTime}) and MitigateDate < datetime({endTime})
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT" 
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| join ( 
+// CRIs every owned by AKS team or contains "CRI-AKS"
+Incidents 
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+| where Title has "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service"
+| distinct IncidentId
+) on IncidentId
+| where OwningTenantName == "Azure Kubernetes Service"
+| distinct IncidentId
+| join kind=leftouter  (IncidentCustomFieldEntries | where Name == "AKSClassification" | distinct IncidentId, Value) 
+on IncidentId
+| summarize dcount(IncidentId) by Value
+| order by dcount_IncidentId desc 
+| render columnchart 
+
+
+//
+// Mitigated CRIs by AKS team, Count by HowFixed
+//
+Incidents
+| where Lens_IngestionTime > ago(30d)
+| where MitigateDate > ago(7d) 
+//| where MitigateDate > datetime({startTime}) and MitigateDate < datetime({endTime})
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT" 
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| join ( 
+// CRIs every owned by AKS team or contains "CRI-AKS"
+Incidents 
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+| where Title has "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service"
+| distinct IncidentId
+) on IncidentId
+| where OwningTenantName == "Azure Kubernetes Service"
+| summarize dcount(IncidentId) by HowFixed
+
+
+//
+// ACTIVE CRI sorted by AGE
+//
+Incidents
+| where Lens_IngestionTime > ago(30d)
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| project Title, CreateDate, url=strcat("https://portal.microsofticm.com/imp/v3/incidents/details/", IncidentId), AGE = now() - CreateDate, OwningContactAlias, OwningTeamName, OwningTenantName, Status, IncidentId, Lens_IngestionTime
+| where Status == 'ACTIVE'
+| where OwningTenantName == "Azure Kubernetes Service"
+| order by AGE desc
+
+//
+// Get the CRI details by classification
+//
+Incidents
+// Get latest snapshot of any CRI that is not JIT
+| where Lens_IngestionTime > ago(30d)
+| where MitigateDate > ago(7d) 
+//| where MitigateDate > datetime({startTime}) and MitigateDate < datetime({endTime})
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT" 
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| join ( 
+// CRIs every owned by AKS team or contains "CRI-AKS"
+Incidents 
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+| where Title has "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service"
+| distinct IncidentId
+) on IncidentId
+| where OwningTenantName == "Azure Kubernetes Service"
+| project Title, TTM = toint((MitigateDate - CreateDate) / 1d), MitigatedBy, url=strcat("https://portal.microsofticm.com/imp/v3/incidents/details/", IncidentId), HowFixed, MitigateDate, CreateDate, IncidentId
+| join kind=leftouter  (IncidentCustomFieldEntries | where Name == "AKSClassification" | distinct IncidentId, Value) 
+on IncidentId
+| project-rename AKSClassification=Value
+| project-reorder AKSClassification
+| sort by AKSClassification desc
+//| where AKSClassification == "Unknown" or  AKSClassification == "Other" or isempty( AKSClassification)   // These are considered unclassified
+
+
+
+//
+// Mitigated by AKS team, order by TTM
+//
+Incidents
+// Get latest snapshot of any CRI that is not JIT
+| where Lens_IngestionTime > ago(30d)
+| where MitigateDate > ago(7d)  // between (startDate .. endDate)
+//| where MitigateDate > datetime({startTime}) and MitigateDate < datetime({endTime})    // Use this in Jarvis Dashboard
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT" 
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| join ( 
+// CRIs every owned by AKS team or contains "CRI-AKS"
+Incidents 
+| where IncidentType == "CustomerReported" and Title != "CSS AKS JIT"
+| where Title has "CRI-AKS" or OwningTenantName == "Azure Kubernetes Service"
+| distinct IncidentId
+) on IncidentId
+| where OwningTenantName == "Azure Kubernetes Service"
+| join kind=leftouter  (IncidentCustomFieldEntries | where Name == "AKSClassification" | distinct IncidentId, Value) 
+on IncidentId
+| project Title, TTM = toint((MitigateDate - CreateDate) / 1d), MitigatedBy, AKSClassification=Value, url=strcat("https://portal.microsofticm.com/imp/v3/incidents/details/", IncidentId), HowFixed, MitigateDate, CreateDate
+| order by TTM desc
+
+
+
+
+
+
+TeamServiceTreeMapping
+| where TeamPublicId contains "container"
+
+
+// Useless fields to project away
+/////////////////////////////////////
+Incidents
+| take 10
+| project-away OwningTeamId, OwningTenantPublicId, OwningContactId, IsCustomerImpacting, Component, Revision, ReproSteps, CommitDate
+  , SourceCreateDate, SourceCreatedBy, SourceId, SourceName, SourceType, SourceIncidentId, SourceOrigin, SourceModifiedDate
+  , RoutingId, CorrelationId, OccurringDeviceGroup, OccurringDeviceName, OccurringServiceInstanceId
+  , RaisingEnvironment, RaisingDatacenter, RaisingDeviceGroup, RaisingDeviceName, RaisingServiceInstanceId
+  , PIRReportId, PublicPirId, PIRLinkDate
+  , ImpactedScenarios, CommsMgrEngagementAdditionalDetails, CommsMgrEngagementMode
+  , ExternalLinksCount, IncidentSubType, TsgOutput, MonitorId
+  , ResponsibleTenantPublicId, OriginatingTenantName, OriginatingTenantId, OriginatingTenantPublicId, SiloId
+  , Lens_Originator, Lens_OriginatorData, Lens_SessionId, Lens_BatchId
+  , ResponsibleTeamId, ResponsibleTeamName, IncidentManagerContactId, CommunicationsManagerContactId, OutageImpactLevel
+  , ExecutiveIncidentManagerContactId, Tags
+  , KBArticleId, LastCorrelationDate, HitCount, ChildCount, RelatedLinksCount, IncidentType
+  , IsNoise, IsSecurityRisk, IsOutage, OutageDeclaredDate
+  , OccurringDatacenter, OccurringEnvironment
+| sort by Lens_IngestionTime desc 
+| project-reorder Lens_IngestionTime, Status
+
+
+/////////////////// Old queries
+ 
+// Search for active AKS CRIs
+cluster('icmcluster').database('IcMDataWarehouse').Incidents 
+| where Lens_IngestionTime > ago(2d)
+| where OwningTenantName == 'Azure Kubernetes Service' 
+| where IncidentType == 'CustomerReported'
+| summarize arg_max(Lens_IngestionTime, *) by IncidentId
+| where Status == 'ACTIVE'
+| project-away SourceId, SourceName, SourceType, SourceIncidentId, RoutingId, CorrelationId, 
+  OccurringEnvironment, OccurringDeviceGroup, OccurringDeviceName, 
+  RaisingEnvironment, RaisingDeviceGroup, RaisingServiceInstanceId, RaisingDeviceName,
+  OwningTeamId, OwningTenantPublicId,  OwningContactId, OwningTenantName, OwningTenantId, Revision, TsgId, ReproSteps, CommitDate, KBArticleId, 
+  PIRReportId, PIRLinkDate, ImpactedScenarios, SourceOrigin, RaisingDatacenter, Component,
+  TsgOutput, PublicPirId, OriginatingTenantPublicId, SiloId, Lens_BatchId, Lens_Originator, Lens_OriginatorData, Lens_SessionId,
+  ModifiedDate, SourceModifiedDate, CreateDate, OccurringServiceInstanceId, IsNoise, IsSecurityRisk, 
+  IsCustomerImpacting, CustomerName, ResolveDate, ResolvedBy, Mitigation, MitigateDate, MitigatedBy, LastCorrelationDate, Keywords,
+  ImpactStartDate, CommsMgrEngagementAdditionalDetails, CommsMgrEngagementMode, CommunicationsManagerContactId, IncidentType, ExternalLinksCount,
+  IncidentSubType, MonitorId, SourceCreatedBy, IsOutage, OutageDeclaredDate,
+  ResponsibleTenantId, ResponsibleTeamId, ResponsibleTenantName, ResponsibleTenantPublicId, ResponsibleTeamName, OriginatingTenantId, OriginatingTenantName, IncidentManagerContactId
+| sort by Lens_IngestionTime asc 
+
+cluster('Icmcluster').database('IcmDataWarehouse').Incidents
+| where ImpactStartDate > ago(1d)
+| where OwningTenantName contains "kubernetes" or OwningTenantName contains "aks" 
+| where Severity == "2"
+//| where Summary contains "DNS"
+| distinct Title, Severity, ImpactStartDate, IncidentId, IsCustomerImpacting, OwningTenantName, Status, Mitigation, IncidentType, MonitorId, ResponsibleTenantName, RaisingEnvironment, SubscriptionId, OwningTeamName, ResponsibleTeamName
+                                     
+
+
+// Exam one incident
+cluster('icmcluster').database('IcMDataWarehouse').Incidents 
+| where OwningTenantName == 'Azure Kubernetes Service' 
+| project-away SourceId, SourceName, SourceType, SourceIncidentId, RoutingId, CorrelationId, 
+  OccurringEnvironment, OccurringDeviceGroup, OccurringDeviceName, 
+  RaisingEnvironment, RaisingDeviceGroup, RaisingServiceInstanceId, RaisingDeviceName,
+  OwningTeamId, OwningTenantPublicId,  OwningContactId, Revision, TsgId, ReproSteps, CommitDate, KBArticleId, 
+  PIRReportId, PIRLinkDate, ImpactedScenarios, SourceOrigin, RaisingDatacenter, Component,
+  TsgOutput, PublicPirId, OriginatingTenantPublicId, SiloId, 
+  Lens_BatchId, Lens_Originator, Lens_OriginatorData, Lens_SessionId, //Lens_IngestionTime, 
+  ModifiedDate, SourceModifiedDate, CommunicationsManagerContactId, IncidentManagerContactId, ResponsibleTenantId
+| where IncidentId == 132878249
+| sort by Lens_IngestionTime desc

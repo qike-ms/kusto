@@ -1,0 +1,96 @@
+﻿cluster('aks').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= ago(1d)
+| where metric in ("job_resource:etcd_object_counts:max")
+| summarize objects=max(value) by cluster_id, resource
+| where objects > 0
+| join kind=inner (
+    cluster('aks').database('AKSprod').AKSClusterMetrics
+    | where PreciseTimeStamp >= ago(1d)
+    | where metric in ("job_os_sku:kube_node_status_capacity_cpu_cores:sum")
+    | summarize cores=max(value) by cluster_id
+    ) on cluster_id
+| summarize clusters=dcount(cluster_id), percentiles(cores, 50, 75, 90, 95, 99, 99.9) by resource
+| order by clusters, resource asc
+
+
+set notruncation;
+let maxDate = endofday(ago(1d));
+cluster('aks.kusto.windows.net').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= datetime(2020-09-21T00:00) and PreciseTimeStamp <= maxDate
+| where metric in ("job_os_sku:kube_node_status_capacity_cpu_cores:sum")
+| project PreciseTimeStamp, resource_id, location, os, sku, value
+| summarize sum(value) by bin(PreciseTimeStamp, 6h), resource_id, location, os, sku
+| summarize max_cores=max(sum_value), min_cores=min(sum_value), avg_cores=avg(sum_value) by bin(PreciseTimeStamp, 1d), resource_id, location, os, sku
+| extend subscription_id = extract(@'/subscriptions/(.+?)/', 1, resource_id)
+| extend SubscriptionGuid = subscription_id
+| extend Timestamp = PreciseTimeStamp
+| extend Location = location
+| extend OsType = os
+| join kind= leftouter
+(
+    cluster('accia').database("CommonDims").Dim_CustomerSubscription
+    | project SubscriptionGuid, AccountTypeFlag, Customer
+)
+on SubscriptionGuid
+| join kind=leftouter
+(
+    cluster('accia').database("CommonDims").Dim_Subscription
+    |project SubscriptionGuid, OfferType,  TPId
+)
+on SubscriptionGuid
+| join kind=leftouter
+(
+    cluster('accia').database("CommonDims").ServiceTree_AIRSSubscriptionFeedV1
+    |project SubscriptionId, OrganizationName, ServiceGroupName, ServiceName
+)
+on $left.SubscriptionGuid == $right.SubscriptionId
+| summarize sum(max_cores), sum(min_cores), sum(avg_cores) by Timestamp, Customer, TPId, AccountTypeFlag, OfferType, Location, OrganizationName, ServiceGroupName, ServiceName, OsType
+
+cluster('aks').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= ago(12h)
+| summarize count(), dcount(cluster_id) by metric
+
+cluster('aks').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= ago(12h)
+| where metric == "job_resource:etcd_object_counts:max" //'null'
+| take 10
+//| distinct metric, cluster_id
+//| summarize count() by metric
+
+// Errors
+cluster('aks').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= ago(12h)
+| where metric == 'null'
+| take 10
+
+
+cluster('aks').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= ago(12h)
+| where metric == "job_resource:etcd_object_counts:max"
+//| summarize clusters=dcount(cluster_id)
+| distinct RPTenant
+
+// Total # of clusters and count percentiles per resource type
+cluster('aks').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= ago(12h)
+| where metric == "job_resource:etcd_object_counts:max"
+| summarize objects=max(value) by cluster_id, resource
+| summarize percentiles(objects, 25, 50, 75, 90, 95, 99, 99.9), clusters=dcount(cluster_id) by resource
+| order by clusters, resource asc
+
+
+// max deployments per cluster in last 12 hours
+cluster('aks').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= ago(12h)
+| where metric == "job_resource:etcd_object_counts:max"
+| where resource in ("deployments.extensions", "deployments.apps")
+| summarize max(value) by cluster_id, resource
+| summarize sum(max_value) by cluster_id
+| summarize percentiles(sum_max_value, 50, 75, 90, 99)
+
+
+// Types of resources in AKS
+cluster('aks').database('AKSprod').AKSClusterMetrics
+| where PreciseTimeStamp >= ago(12h)
+| where metric == "job_resource:etcd_object_counts:max"
+| distinct resource

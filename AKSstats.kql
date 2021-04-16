@@ -1,0 +1,618 @@
+////////////////////////////
+// cluster('aks').database('AKSstats'), retention for 1k days
+////////////////////////////
+.show database policies
+
+.add database AKSstats admins ('aaduser=jpalma@microsoft.com')
+
+.add database AKSstats admins ('aadgroup=aks-kusto-admins@microsoft.com')
+
+.add database AKSprod viewers ('aadapp=01394e3c-33b7-4d28-85cf-250df48d00a5;72f988bf-86f1-41af-91ab-2d7cd011db47')
+
+.add database AKSprod viewers ('aadapp=01394e3c-33b7-4d28-85cf-250df48d00a5;72f988bf-86f1-41af-91ab-2d7cd011db47')
+
+.add database AKSstats viewers ('aadapp=01394e3c-33b7-4d28-85cf-250df48d00a5;72f988bf-86f1-41af-91ab-2d7cd011db47')
+
+.show database AKSstats principals 
+
+.show operations b9b84ae6-9c5e-44b9-9726-238fca196654
+
+////////////////     CRON INSERTS      ///////////////////////////////////////
+
+////////    CoresPerCustomerBBM
+// Append cores per customer from last processed day from AKS BBM table
+// This query has to be run in cluster('aks').database('AKSstats')
+//
+print lastProcessDay = datetime_add('day', 1, toscalar (CoresPerCustomerBBM | summarize max(day))), endDay = endofday(ago(1d))
+
+//.set-or-append async
+.append async CoresPerCustomerBBM <|  // This line will append new data to the table . // add async if running too long
+let lastProcessDay = datetime_add('day', 1, toscalar (CoresPerCustomerBBM | summarize max(day))); 
+//let lastProcessDay = ago(400d);
+let endDay = endofday(ago(1d)); // Skip data for today since it's incomplete 
+getCoresPerCustomerBBM(lastProcessDay, endDay) // Skip data for today since it's incomplete 
+
+.show operations c1f7d35c-e8f5-4166-a47c-572a6af51314
+| project State, Operation, Duration
+
+
+
+//////  DEPRECATED QUERIES USING VM core data   ///////////////////////////////////////////
+// AKSCoresPerCustomer 
+// Append core per customer from last processed day from accia.CUD.ComputeUsage_Daily
+// This query has to be run in cluster('aks').database('AKSstats')
+print lastProcessDay = datetime_add('day', 1, toscalar (AKSCoresPerCustomer | summarize max(day))), endofday(ago(7d))
+
+//.set-or-append async
+.append async AKSCoresPerCustomer <|
+set notruncation;
+let lastProcessDay = datetime_add('day', 1, toscalar (AKSCoresPerCustomer | summarize max(day))); 
+// let lastProcessDay = ago(400d);  // Use this to populate table first time
+let endDay = endofday(ago(7d));     // Allow 7 days of delay of data ingestion to cluster('accia').database('CUD').ComputeUsage_Daily
+getAKSCoresPerCustomer(lastProcessDay, endDay)
+////////
+
+////////    AKSCoresPerSub
+// AKS cores per sub
+// Print out datetime range the query will use to ingest into AKSCoresPerSub table
+print lastProcessDay = datetime_add('day', 1, toscalar (AKSCoresPerSub | summarize max(day))), endofday(ago(7d))
+
+.append async AKSCoresPerSub <| 
+set notruncation;
+let lastProcessDay = datetime_add('day', 1, toscalar (AKSCoresPerSub | summarize max(day))); 
+// let lastProcessDay = ago(400d);  // Use this to populate table first time
+let endDay = endofday(ago(7d));    // Allow 7 days of delay of data ingestion to cluster('accia').database('CUD').ComputeUsage_Daily
+getAKSCoresPerSub(lastProcessDay, endDay)
+///////////// END OF DEPRECATED. ///////////////////////////////////////////////
+
+
+
+////////////// BBM: CORES AND CUSTOMERS   ////////////////////////////////////////////
+// 
+//
+CoresPerCustomerBBM 
+| extend IsExternalPaid = (not(IsInternalCustomer(Customer)) and (AccountTypeFlag == 'External') and IsPaidOffer(OfferType))
+| summarize External_Paid_Customers = countif(IsExternalPaid), Non_External_Paid_Customers = countif(IsExternalPaid == False), 
+            total_cores = sum(TotalCores), External_Paid_Cores_BBM = sumif(TotalCores, IsExternalPaid), Non_External_Paid_cores = sumif(TotalCores, IsExternalPaid == False) by day
+| render timechart with (xcolumn=day)
+
+ 
+// BBM: cores and customers with Windows split
+getCoresPerCustomerBBM(endofday(ago(3d)), endofday(ago(1d))) 
+| extend IsExternalPaid = (not(IsInternalCustomer(Customer)) and (AccountTypeFlag == 'External') and IsPaidOffer(OfferType))
+| summarize External_Paid_Customers = countif(IsExternalPaid), Non_External_Paid_Customers = countif(IsExternalPaid == False), 
+            External_Paid_Customers_WIN = countif(IsExternalPaid and TotalWindowsCores > 0), Non_External_Paid_Customers_WIN = countif(IsExternalPaid == False and TotalWindowsCores > 0), 
+            External_Paid_Cores_BBM = sumif(TotalCores, IsExternalPaid), Non_External_Paid_cores = sumif(TotalCores, IsExternalPaid == False),
+            External_Paid_Cores_BBM_WIN = sumif(TotalWindowsCores, IsExternalPaid ), Non_External_Paid_cores_WIN = sumif(TotalWindowsCores, IsExternalPaid == False) by day
+//| render timechart with (xcolumn=day)
+
+CoresPerCustomerBBM 
+| extend IsExternalPaid = (not(IsInternalCustomer(Customer)) and (AccountTypeFlag == 'External') and IsPaidOffer(OfferType))
+| summarize External_Paid_Customers = countif(IsExternalPaid), Non_External_Paid_Customers = countif(IsExternalPaid == False), 
+            External_Paid_Cores_BBM = sumif(TotalCores, IsExternalPaid), Non_External_Paid_cores = sumif(TotalCores, IsExternalPaid == False) by day
+| render timechart with (xcolumn=day)
+
+
+// Morgan and Walmart core consumption
+//
+CoresPerCustomerBBM
+| where Customer contains "walmart" or Customer contains "morgan"
+| where IsExternalPaid == true 
+| summarize sum(TotalCores) by day, Customer
+| render timechart 
+
+
+// New customers per day (acquisition)
+let min_day=datetime('2019-07-16');
+CoresPerCustomerBBM
+| where Customer != 'Cloud + AI'  // Skip internal clusters
+| summarize arg_min(day, *) by Customer
+| summarize CustomersStartAKS_BBM = count() by day
+| where day > min_day
+| render columnchart   
+
+
+// Customers leaving by day, measured by no more usage in last 7 days (churn)
+let max_day= datetime_add('day', -7, toscalar (CoresPerCustomerBBM | summarize max(day)));
+CoresPerCustomerBBM
+| where Customer != 'Cloud + AI' // Skip internal clusters
+| summarize arg_max(day, *) by Customer
+| summarize CustomersQuitAKS_BBM = count() by day
+| where day < max_day
+| render columnchart
+
+// BBM: Histogram by number of days before leaving AKS
+let min_day=datetime('2019-07-20');
+let max_day=toscalar (CoresPerCustomerBBM | summarize max(day));
+CoresPerCustomerBBM
+| summarize arg_min(day, *) by Customer
+| where day > min_day
+| join (
+  CoresPerCustomerBBM
+  | summarize arg_max(day, *) by Customer
+  | where day < max_day
+  )
+on Customer
+| extend duration = (day1 - day) / 1d
+| summarize count() by duration
+| render columnchart 
+/////////////////    END OF cores from BBM data    ////////////////////////////////////////
+
+
+/////////////  DEPRECATED QUERIES USING VM core data   ////////////////////////
+
+// DATA INTEGRITY CHECK:  between AKSCoresPerSub and AKSCoresPerCustomer
+AKSCoresPerSub | summarize sum(TotalCores) by day, Location 
+| join kind=fullouter (AKSCoresPerCustomer | summarize sum(TotalCores) by day, Location )
+on day, Location
+| where toint(sum_TotalCores) != toint(sum_TotalCores1 + 0.5) and toint(sum_TotalCores) != toint(sum_TotalCores1 - 0.5)  // Remove the float error
+
+// CORES AND CUSTOMERS TREND: Get total external paid cores and customers per geo location over day for ARO and AKS
+
+//       AKS AKS AKS AKS
+// Cores per day
+AKSCoresPerCustomer 
+| where IsExternalPaid == true and IsARO == false
+| extend geo = GetGeoFromRegion(Location)
+| summarize AKSExternalPaidCores = sum(TotalCores) by day//, geo
+| render timechart 
+
+// Customers per day
+AKSCoresPerCustomer 
+| where IsExternalPaid == true and IsARO==false
+| extend geo = GetGeoFromRegion(Location)
+| summarize AKSExternalPaidCustomers = count() by day//, geo
+| render timechart 
+
+// Cores by customer
+AKSCoresPerCustomer
+| where IsARO == false // and IsExternalPaid == true
+| summarize arg_max(day, *) by Customer
+| extend t = toint(TotalCores)
+| summarize totalCores=sum(t) by Customer
+| where IsInternalCustomer(Customer)
+| sort by totalCores desc
+
+
+//       ARO ARO ARO ARO
+// Cores per day
+AKSCoresPerCustomer 
+| extend geo = GetGeoFromRegion(Location)
+| where IsExternalPaid == true
+| summarize AROExternalPaidCores = sumif(TotalCores, IsARO) by day//, geo
+| render timechart 
+
+// Customers per day
+AKSCoresPerCustomer 
+| extend geo = GetGeoFromRegion(Location)
+| where IsExternalPaid == true
+| summarize AROExternalPaidCustomers = countif(IsARO) by day//, geo
+| render timechart 
+/////    END OF DEPRECATED.    ////////////////////////////////////////////////////////////////
+
+
+////////////// Get total cores for each vm series.  ////////////////////////////////////////////
+// "N" "H" "L" "G" "M"
+
+// Get per customer core consumption by series
+let customers =  cluster('accia').database("CommonDims").Dim_CustomerSubscription
+    | distinct SubscriptionGuid, Customer, AccountTypeFlag;
+cluster("aks").database("AKSprod").BlackboxMonitoringActivity
+| where TIMESTAMP > ago(1d)
+| summarize arg_max(TIMESTAMP, vmSkus) by fqdn, subscriptionID
+| where isnotempty(vmSkus) and vmSkus != '{}'
+| extend cores=todynamic(vmSkus)
+| mv-expand key=bag_keys(cores) to typeof(string)
+| extend c=toint(cores[key])
+| join kind= leftouter customers on $left.subscriptionID == $right.SubscriptionGuid | project-away SubscriptionGuid
+| summarize cores_per_type=sum(c) by key, Customer
+| extend T=trim('standard_', tolower(substring(key, 0, 10)))
+| summarize cores_per_T=sum(cores_per_type) by T, Customer
+| where Customer contains "walmart" or Customer contains "morgan"  // Get Morgan and Warlmart
+| sort by Customer, cores_per_T desc
+
+
+// Get per customer core consumption by series
+let customers =  cluster('accia').database("CommonDims").Dim_CustomerSubscription
+    | distinct SubscriptionGuid, Customer, AccountTypeFlag;
+cluster("aks").database("AKSprod").BlackboxMonitoringActivity
+| where TIMESTAMP > ago(10d)
+| summarize arg_max(totalAgentCores, vmSkus) by fqdn, subscriptionID, d=bin(TIMESTAMP, 1d)
+| where isnotempty(vmSkus) and vmSkus != '{}'
+| extend cores=todynamic(vmSkus)
+| mv-expand key=bag_keys(cores) to typeof(string)
+| extend c=toint(cores[key])
+| join kind= leftouter customers on $left.subscriptionID == $right.SubscriptionGuid | project-away SubscriptionGuid
+| summarize cores_per_type=sum(c) by key, Customer,d
+| extend T=trim('standard_', tolower(substring(key, 0, 10)))
+| summarize cores_per_T=sum(cores_per_type) by T, d //, Customer
+| sort by d, cores_per_T desc
+| render columnchart  with (xcolumn=d, ycolumns=cores_per_T, series=T)  
+
+
+// Get percentage of D series over total
+cluster("aks").database("AKSprod").BlackboxMonitoringActivity
+| where TIMESTAMP > ago(1d)
+| summarize arg_max(TIMESTAMP, vmSkus) by fqdn, subscriptionID
+| where isnotempty(vmSkus) and vmSkus != '{}'
+| extend cores=todynamic(vmSkus)
+| mv-expand key=bag_keys(cores) to typeof(string)
+| extend c=toint(cores[key])
+| summarize cores_per_type=sum(c) by key
+| extend T=trim('standard_', tolower(substring(key, 0, 10)))
+| summarize cores_per_T=sum(cores_per_type) by T
+| summarize d=sumif(cores_per_T, T=='d'), t=sum(cores_per_T)
+| extend p=d*100./t
+
+
+
+// Total number of cores per type of large type of VMs
+cluster("aks").database("AKSprod").BlackboxMonitoringActivity
+| where TIMESTAMP > ago(1d)
+| summarize arg_max(TIMESTAMP, vmSkus) by fqdn
+| where isnotempty(vmSkus) and vmSkus != '{}'
+| extend cores=todynamic(vmSkus)
+| mv-expand key=bag_keys(cores) to typeof(string)
+| extend c=toint(cores[key])
+| summarize cores_per_type=sum(c) by key
+| extend T=trim('standard_', tolower(substring(key, 0, 10)))
+| summarize cores_per_T=sum(cores_per_type) by T
+| sort by cores_per_T desc 
+
+// Another way to expand keys and values into separate columes for each entry in a dictionary from a property bag
+cluster("aks").database("AKSprod").BlackboxMonitoringActivity
+| where TIMESTAMP > ago(1d)
+| summarize arg_max(TIMESTAMP, vmSkus) by fqdn
+| where isnotempty(vmSkus) and vmSkus != '{}'
+| extend cores=todynamic(vmSkus)
+| mv-expand cores
+| extend keys=bag_keys(cores)
+| mv-expand key = ['keys'] to typeof(string)
+| extend c=toint(cores[key])
+///////////////////////////////////////////////////////////////
+
+
+////////////// Get total PVs consumed by clusters  ////////////////////////////////////////////
+//
+// Pengfei's query to collect disk count
+BlackboxMonitoringActivity 
+| where PreciseTimeStamp > ago(1h)
+| extend temp = parse_json(customerPersistentVolumeConfig)
+| where temp != "{}" | where temp != ""
+//| where fqdn == "andy-aks11-andy-aks1184-b9d228-131635c5.hcp.eastus2euap.azmk8s.io"
+| summarize bag=make_bag(temp) by fqdn, totalCustomerDeploymentCount, totalCustomerStatefulSetCount, totalCustomerDaemonSetCount, computeNodeCount, infraNodeCount, agentNodeCount
+| evaluate bag_unpack(bag)
+| summarize dcount(fqdn) by totalCustomerDeploymentCount, totalCustomerStatefulSetCount, totalCustomerDaemonSetCount, agentNodeCount, ['AzureDisks-Deployment'],['AzureDisksPremium-Deployment'], ['AzureDisks-StatefulSet'], ['AzureDisksPremium-StatefulSet']
+| where ['AzureDisks-Deployment'] > 0 or ['AzureDisksPremium-Deployment'] > 0 or ['AzureDisks-StatefulSet'] > 0 or ['AzureDisksPremium-StatefulSet'] > 0
+| project dcount_fqdn, totalCustomerDeploymentCount, totalCustomerStatefulSetCount, agentNodeCount, ['AzureDisks-Deployment'], ['AzureDisksPremium-Deployment'], ['AzureDisks-StatefulSet'], ['AzureDisksPremium-StatefulSet']
+| order by ['AzureDisks-Deployment'], ['AzureDisksPremium-Deployment'], ['AzureDisks-StatefulSet'], ['AzureDisksPremium-StatefulSet'] desc
+
+
+// Get # of PVs being used vs PVs configured in customerPersistentVolumeConfig but with "0"
+BlackboxMonitoringActivity 
+| where PreciseTimeStamp > ago(1h)
+//| summarize arg_max(PreciseTimeStamp, totalCustomerDeploymentCount, totalCustomerStatefulSetCount, totalCustomerDaemonSetCount, totalAgentCores, agentNodeCount, customerPersistentVolumeConfig) by fqdn
+| summarize arg_max(PreciseTimeStamp, totalCustomerStatefulSetCount, agentNodeCount, customerPersistentVolumeConfig) by fqdn
+| extend temp = parse_json(customerPersistentVolumeConfig)
+| where isnotempty(temp) and temp != "{}"
+| mv-expand key=bag_keys(temp) to typeof(string)
+| extend c=toint(temp[key])
+| project-away temp
+| summarize countif(c>0), count()
+
+
+// Get top clusters using most number of PVs
+BlackboxMonitoringActivity 
+| where PreciseTimeStamp > ago(1h)
+//| summarize arg_max(PreciseTimeStamp, totalCustomerDeploymentCount, totalCustomerStatefulSetCount, totalCustomerDaemonSetCount, totalAgentCores, agentNodeCount, customerPersistentVolumeConfig) by fqdn
+| summarize arg_max(PreciseTimeStamp, totalCustomerStatefulSetCount, agentNodeCount, customerPersistentVolumeConfig) by fqdn
+| extend temp = parse_json(customerPersistentVolumeConfig)
+| where isnotempty(temp) and temp != "{}"
+| mv-expand key=bag_keys(temp) to typeof(string)
+| extend c=toint(temp[key])
+| project-away temp
+| where c>0
+| sort by c desc 
+| top 100
+
+
+// Get # of clusters using persistent volume
+BlackboxMonitoringActivity 
+| where PreciseTimeStamp > ago(1h)
+//| summarize arg_max(PreciseTimeStamp, totalCustomerDeploymentCount, totalCustomerStatefulSetCount, totalCustomerDaemonSetCount, totalAgentCores, agentNodeCount, customerPersistentVolumeConfig) by fqdn
+| summarize arg_max(PreciseTimeStamp, totalCustomerStatefulSetCount, agentNodeCount, customerPersistentVolumeConfig) by fqdn
+| extend temp = parse_json(customerPersistentVolumeConfig)
+| where isnotempty(temp) and temp != "{}"
+| mv-expand key=bag_keys(temp) to typeof(string)
+| extend c=toint(temp[key])
+| where c > 0
+| summarize dcount(fqdn)
+
+///////////////////////////////////////////////////////////////
+
+
+
+//////////////////// Customer and subscription data ////////////////////////
+//
+// CustomerType in Dim_Subscription IS NOT RELIABLE !!!!!!!!!!!!!!!!!!! 
+// USE AccountTypeFlag in Dim_CustomerSubscription
+//cluster('accia').database("CommonDims").Dim_Subscription
+//| distinct CustomerType   // External, Internal, Fraud
+
+cluster('accia').database("CommonDims").Dim_CustomerSubscription 
+| distinct AccountTypeFlag    // External or Internal
+
+cluster('accia').database("CommonDims").Dim_Subscription
+| distinct SystemName     // Enterprise, MINT
+
+cluster('accia').database("CommonDims").Dim_Subscription
+//| distinct OfferType // 17 types:EA, CSP, Sponsored, Promotional, Internal, Consumption, Trial, Government etc.
+| distinct OfferName   // 118 
+
+cluster('accia').database("CommonDims").Dim_Subscription
+| distinct BillingType    // External - Billable, External - Non Billable, Internal
+
+// Should be empty: fraud value on both CustomerType and IsFraud
+// Many internal subs are marked fraud
+cluster('accia').database("CommonDims").Dim_Subscription
+| where ((CustomerType != 'Fraud' and CustomerType != 'Internal') and IsFraud == true)
+    or (CustomerType == 'Fraud' and IsFraud == false)
+
+// Experiment query for "getAKSCoresPerCustomer" function
+let start = ago(2d);
+let end = ago(1d);
+let customers =  cluster('accia').database("CommonDims").Dim_CustomerSubscription
+    | distinct SubscriptionGuid, Customer, AccountTypeFlag;
+let subs =     cluster('accia').database("CommonDims").Dim_Subscription
+    | distinct SubscriptionGuid, OfferType, TPId, SubscriptionStatus;
+cluster('accia').database('CUD').ComputeUsage_Daily
+| where Timestamp > start and Timestamp <= end
+| where Extensions contains "Microsoft.AKS.Compute.AKS.Linux.Billing" or Extensions contains "Microsoft.AKS.Compute.AKS.Windows.Billing"
+| summarize Cores = sum(QuantityCores) by day = bin(Timestamp, 1d), SubscriptionGuid=SubscriptionId, Location, OsType
+| join kind= leftouter customers on SubscriptionGuid | project-away SubscriptionGuid1
+| join kind= leftouter subs on SubscriptionGuid | project-away SubscriptionGuid1
+| summarize TotalCores = sum(Cores) by day, Customer, OfferType, TPId, AccountTypeFlag, Location, OsType, SubscriptionStatus
+| extend IsExternalPaid = (not(IsInternalCustomer(Customer)) and (AccountTypeFlag == 'External') and IsPaidOffer(OfferType))
+//| summarize sum(TotalCores) by SubscriptionStatus
+| summarize sum(TotalCores) by IsExternalPaid
+
+
+// Move table from AKSprod to AKSstats
+//.set-or-append CoresPerCustomerBBM <|  // add async if too long
+//database("AKSprod").CustomerCoreByDay
+
+
+// Use code below to verify there is no dup
+.set-or-replace  temp <| 
+let lastProcessDay = datetime_add('day', 1, toscalar (AKSCoresPerSub | summarize max(day))); 
+let endDay = endofday(ago(7d))
+getAKSCoresPerSub(lastProcessDay, endDay)
+
+// Should be empty
+AKSCoresPerSub
+| join kind=inner temp on SubscriptionGuid, day
+
+
+
+// Cores per day with BBM data
+let customers =  cluster('accia').database("CommonDims").Dim_CustomerSubscription
+    | distinct SubscriptionGuid, Customer, AccountTypeFlag;
+cluster("aks").database("AKSprod").BlackboxMonitoringActivity
+    | where PreciseTimeStamp > endofday(ago(30d)) and PreciseTimeStamp < endofday(ago(1d))
+    | where agentNodeCount > 0 
+    | where namespace != 'osa'
+    | summarize arg_max(TIMESTAMP, *) by ccpNamespace, day=bin(TIMESTAMP, 1d)  // when bin, day is the start of the day of TIMESTAMP
+    | summarize cores=sum(totalAgentCores) by SubscriptionGuid=subscriptionID, day
+| join kind= leftouter customers on SubscriptionGuid | project-away SubscriptionGuid1
+    | summarize Cores=sum(cores) by day
+    | render timechart 
+
+
+// Cores per day and sub with BBM data
+cluster("aks").database("AKSprod").BlackboxMonitoringActivity
+    | where PreciseTimeStamp > endofday(ago(3d)) and PreciseTimeStamp < endofday(ago(1d))
+    | where agentNodeCount > 0 
+    | where namespace != 'osa'
+    | summarize arg_max(TIMESTAMP, *) by ccpNamespace, day=bin(TIMESTAMP, 1d)  // when bin, day is the start of the day of TIMESTAMP
+    | summarize Cores=sum(totalAgentCores) by SubscriptionGuid=subscriptionID, day
+    | sort by day, Cores desc
+
+
+//*****   ONLY FOR BUG FIXING: ONE DAY INSERTS   *******//
+
+// Purge data for one day
+// Run this against ingestion url: https://dataexplorer.azure.com/clusters/ingest-aks
+// Can do this for AKSCoresPerSub as well
+
+.purge table AKSCoresPerCustomer records in database AKSstats <| where  day == datetime('2019-12-25')
+  // Then followed by: 
+
+  .purge table AKSCoresPerCustomer records in database AKSstats
+   with (verificationtoken='eyJEYXRhYmFzZU5hbWUiOiJBS1NzdGF0cyIsIlRhYmxlTmFtZSI6IkFLU0NvcmVzUGVyQ3VzdG9tZXIiLCJQcmVkaWNhdGUiOiJ3aGVyZSAgZGF5ID09IGRhdGV0aW1lKCcyMDE5LTEyLTI1JykifQ==')
+   <| where  day == datetime('2019-12-25')
+
+.purge table AKSCoresPerSub records in database AKSstats <| where  day == datetime('2019-11-04')
+  // Then followed by:
+
+  .purge table AKSCoresPerSub records in database AKSstats
+   with (verificationtoken='eyJEYXRhYmFzZU5hbWUiOiJBS1NzdGF0cyIsIlRhYmxlTmFtZSI6IkFLU0NvcmVzUGVyQ3VzdG9tZXIiLCJQcmVkaWNhdGUiOiJ3aGVyZSAgZGF5ID09IGRhdGV0aW1lKCcyMDE5LTExLTA0JykifQ==')
+   <| where  day == datetime('2019-11-04')
+
+
+// Insert the data for the missing day
+.set-or-append AKSCoresPerCustomer <|
+set notruncation;
+let end = datetime('2019-10-25'); // Insert data for day == end
+getAKSCoresPerCustomer(end - 1d, end)
+
+
+/////////////////////////
+/// Get all internal users of Kubernetes
+/////////////////////////
+cluster('ceinventory.kusto.windows.net').database('Inventory').Main_Infraguest
+//| where PlatformType contains 'Linux'
+| where OSType == "Linux"
+| where RoleName startswith 'aks-'
+| distinct ServiceTreeName, Division, Org, ProductionSub, RoleName
+//| summarize VMCount=dcount(CRPVMId) by ServiceTreeName,SubscriptionName, RoleName, Division, Org
+
+cluster('ceinventory.kusto.windows.net').database('Inventory').Main_Infraguest
+| where RoleName startswith 'aks-'
+| summarize VMCount=dcount(CRPVMId), SubCount=dcount(SubscriptionName) by ServiceTreeName,Division, Org, ProductionSub, OSType
+| sort by VMCount desc
+
+
+/////////         END OF QUERIES          ////////////////////////
+
+
+
+/////////////////////     FUNCTIONS      ///////////////////////////////////////
+
+//      Function to get subscription name from Id
+.create-or-alter function with (folder = "qike", docstring = "Get subscription Name .", skipvalidation = "false")
+GetSubName(subId : string) {
+  cluster('accia').database("CommonDims").Dim_Subscription
+  | where SubscriptionGuid == subId
+  | project SubscriptionGuid, SubscriptionName, SubscriptionStatus, CustomerName, CustomerType
+}
+
+
+//      Function to get geo from region
+.create-or-alter function with (folder = "prod", docstring = "Get geo location from region.", skipvalidation = "false")
+GetGeoFromRegion(region : string) {
+  let l = replace('east|west|south|north|central|2|euap', '', region);
+  case(region =='francec', 'france', region == 'chinae2', 'china', region == 'chinan2', 'china', l)
+}
+
+print GetGeoFromRegion('centralus2euap')
+
+//      Function to decide if a customer is internal name
+// Sometimes an internal cusotmer is marked as "external". Hence we need to use customer name to further filter
+.create-or-alter function with (folder = "prod", docstring = "Check name to see if customer is internal.", skipvalidation = "false")
+IsInternalCustomer(Customer : string) {
+  Customer in ("Marketing and Consumer Business",
+      "C+E Engineering Group",
+      "Worldwide Commercial Business",
+      "The worldwide partner group",
+      "Azure Win Server Marketing",
+      "Microsoft",
+      "MICROSOFT",
+      "AZURE",
+      "Global Sales and Marketing Ops",
+      "Cloud + AI",
+      "AI & Research Group",
+      "Experiences + Devices",
+      "Gaming")
+}
+
+print cluster('aks').database('AKSstats').IsInternalCustomer("a")
+
+//     Function to decide if an offer is externally paid
+.create-or-alter function with (folder = "prod", docstring = "Check OfferType if it's paid", skipvalidation = "false")
+IsPaidOffer(Offer : string) {
+  Offer in ("Consumption", "CSP", "EA", "Monetary Commitment", "Open", "Government")
+}
+
+print IsPaidOffer("Consumption")
+
+//     Function to decide if it's AKS extensions
+.create-or-alter function with (folder = "prod", docstring = "Check Extensions to find AKS usages", skipvalidation = "false")
+IsAKSExtension(Extensions : string) {
+  Extensions contains "Microsoft.AKS.Compute.AKS.Linux.Billing" or Extensions contains "Microsoft.AKS.Compute.AKS.Windows.Billing"
+}
+
+print IsAKSExtension('Microsoft.AKS.Compute.AKS.Linux.Billing')
+
+print IsAKSExtension('Microsoft.AKS.Compute.AKS-Engine.Linux.Billing')
+
+.create-or-alter function with (folder = "prod", docstring = "Check CRPSku to find ARO usages", skipvalidation = "false")
+IsAROSku(CRPSku : string) {
+  CRPSku == "osa_310" or CRPSku == "osa_311"
+}
+
+print IsAROSku("osa_310") 
+
+print IsAROSku("osa") 
+
+
+//     getAKSCoresPerCustomer from ComputeUsage_Daily
+.create-or-alter function with (
+  folder = "prod", 
+  docstring = "Get AKSCoresPerCustomer from start to end.", 
+  skipvalidation = "false")
+getAKSCoresPerCustomer(start : datetime, end : datetime) {
+let customers =  cluster('accia').database("CommonDims").Dim_CustomerSubscription
+    | distinct SubscriptionGuid, Customer, AccountTypeFlag;
+let subs =     cluster('accia').database("CommonDims").Dim_Subscription
+    | distinct SubscriptionGuid, OfferType, TPId;
+cluster('accia').database('CUD').ComputeUsage_Daily
+| where Timestamp > start and Timestamp <= end
+| where IsAKSExtension(Extensions) or IsAROSku(CRPSku)        //  Only select entries that are AKS or ARO usages
+| summarize Cores = sum(QuantityCores) by day = bin(Timestamp, 1d), SubscriptionGuid=SubscriptionId, Location, OsType, IsARO=IsAROSku(CRPSku)
+| join kind= leftouter customers on SubscriptionGuid | project-away SubscriptionGuid1
+| join kind= leftouter subs on SubscriptionGuid | project-away SubscriptionGuid1
+| summarize TotalCores = sum(Cores) by day, Customer, OfferType, TPId, AccountTypeFlag, Location, OsType, IsARO
+| extend IsExternalPaid = (not(IsInternalCustomer(Customer)) and (AccountTypeFlag == 'External') and IsPaidOffer(OfferType))
+}
+
+getAKSCoresPerCustomer(ago(5d), ago(4d)) | summarize sum(TotalCores) by IsARO
+
+//      getAKSCoresPerSub from ComputeUsage_Daily
+.create-or-alter function with (
+  folder = "prod", 
+  docstring = "Get AKSCoresPerSub from start to end.", 
+  skipvalidation = "false")
+getAKSCoresPerSub(start : datetime, end : datetime) {
+    cluster('accia').database('CUD').ComputeUsage_Daily
+    | where Timestamp > start
+    | where Timestamp <= end
+    | where IsAKSExtension(Extensions) or IsAROSku(CRPSku)        //  Only select entries that are AKS or ARO usages   // CRPOffer == 'aks' or 'aro'
+    | summarize TotalCores = sum(QuantityCores) by day = bin(Timestamp, 1d), SubscriptionGuid=SubscriptionId, Location, OsType, IsARO=IsAROSku(CRPSku)
+}
+
+getAKSCoresPerSub(ago(5d), ago(4d)) | summarize sum(TotalCores) by IsARO
+
+//      Get AKS Engine cores from ComputeUsage_Daily
+.create-or-alter function with (
+  folder = "prod", 
+  docstring = "Get AKS Engine cores per sub from start to end.", 
+  skipvalidation = "false")
+getAKSEngineCoresPerSub(start : datetime, end : datetime) {
+    cluster('accia').database('CUD').ComputeUsage_Daily
+    | where Timestamp > start
+    | where Timestamp <= end
+    | where CRPOffer == 'aks'
+    | where Extensions contains "Microsoft.AKS.Compute.AKS-Engine.Linux.Billing" or Extensions contains "Microsoft.AKS.Compute.AKS-Engine.Windows.Billing"
+    | summarize TotalCores = sum(QuantityCores) by day = bin(Timestamp, 1d), SubscriptionGuid=SubscriptionId, Location, OsType
+}
+
+getAKSEngineCoresPerSub(ago(5d), ago(2d))
+
+
+
+//     getCoresPerCustomerBBM
+.create-or-alter function with (
+  folder = "prod", 
+  docstring = "Get coresPerCustomer from start to end.", 
+  skipvalidation = "false")
+getCoresPerCustomerBBM(start : datetime, end : datetime) {
+    let customers =  cluster('accia').database("CommonDims").Dim_CustomerSubscription
+        | distinct SubscriptionGuid, Customer, AccountTypeFlag;
+    let subs =     cluster('accia').database("CommonDims").Dim_Subscription
+        | distinct SubscriptionGuid, OfferType, TPId;
+    cluster("aks").database("AKSprod").BlackboxMonitoringActivity
+    | where PreciseTimeStamp > start and PreciseTimeStamp <= end
+    | where agentNodeCount > 0 
+    | where namespace != 'osa'
+    | summarize arg_max(TIMESTAMP, *) by ccpNamespace, day=bin(TIMESTAMP, 1d)  // when bin, day is the start of the day of TIMESTAMP
+    | summarize Cores=sum(totalAgentCores), LinuxCores = sum(linuxCoreCount), WindowsCores = sum(windowsCoreCount) by SubscriptionGuid=subscriptionID, day
+    | join kind= leftouter customers on SubscriptionGuid | project-away SubscriptionGuid1
+    | join kind= leftouter subs on SubscriptionGuid | project-away SubscriptionGuid1
+    | summarize TotalCores = sum(Cores), TotalLinuxCores = sum(LinuxCores), TotalWindowsCores = sum(WindowsCores) by day, Customer, OfferType, TPId, AccountTypeFlag
+    | extend IsExternalPaid = (not(IsInternalCustomer(Customer)) and (AccountTypeFlag == 'External') and IsPaidOffer(OfferType))
+}
+
+////////    This line of comment can not be connected to function above, otherwise Kusto will report parsing error! 
+////////    END OF FUNCTIONS      ////////////////////////////////////
+
+.show function getCoresPerCustomerBBM

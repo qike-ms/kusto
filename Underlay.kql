@@ -1,0 +1,81 @@
+﻿//////////////////////////////////////////
+// AKS Underlay Node Info
+//////////////////////////////////////////
+
+UnderlayNodeInfo
+| where TIMESTAMP > ago(30m) 
+| summarize arg_max(PreciseTimeStamp, *) by VMID 
+| project CertNextExpires, ResourceGroup, HostName
+| order by CertNextExpires asc
+
+
+// Underlay node info
+UnderlayNodeInfo
+| summarize arg_max(TIMESTAMP, *) by HostName
+| where not(Underlay startswith "svc")
+| project Underlay, HostName, VMSize, PrivateIPAddress, HostUptimeDesc, DockerContainers, CCPTotal, PodsTotal, Environment
+| sort by Underlay
+
+
+
+AsyncQoSEvents
+| where TIMESTAMP > ago(3h)
+| where RPTenant =~ "australiaeast"
+| where result == "Failed"
+| project PreciseTimeStamp, operationName, suboperationName, subscriptionID, resourceGroupName, result, cxUnderlayName
+| summarize count() by cxUnderlayName
+
+
+AsyncQoSEvents
+| where PreciseTimeStamp > ago(10d)
+| where RPTenant =~ "australiaeast"
+| where result == "Succeeded"
+| project PreciseTimeStamp, operationName, suboperationName, subscriptionID, resourceGroupName, result, cxUnderlayName
+| summarize count() by cxUnderlayName, bin(PreciseTimeStamp, 1h)
+| join (AsyncQoSEvents
+  | where PreciseTimeStamp > ago(10d)
+  | where RPTenant =~ "australiaeast"
+  | where result == "Failed"
+  | project PreciseTimeStamp, operationName, suboperationName, subscriptionID, resourceGroupName, result, cxUnderlayName
+  | summarize count() by cxUnderlayName, bin(PreciseTimeStamp, 1h))
+on cxUnderlayName, PreciseTimeStamp
+| project-away PreciseTimeStamp1, cxUnderlayName1
+| render timechart with (series= cxUnderlayName)
+
+
+
+AsyncQoSEvents
+  | where PreciseTimeStamp > ago(1d)
+  | where RPTenant =~ "australiaeast"
+  | where result == "Failed"
+  | project PreciseTimeStamp, operationName, suboperationName, subscriptionID, resourceGroupName, result, cxUnderlayName
+  | summarize count() by cxUnderlayName, bin(PreciseTimeStamp, 1h)
+
+
+(AsyncQoSEvents
+  | where PreciseTimeStamp > ago(10d)
+  | where RPTenant =~ "australiaeast"
+  | where result == "Failed"
+  | project PreciseTimeStamp, operationName, suboperationName, subscriptionID, resourceGroupName, result, cxUnderlayName
+  | summarize count() by cxUnderlayName, bin(PreciseTimeStamp, 1h))
+| join kind=leftouter  (UnderlayNodeInfo
+| where PreciseTimeStamp > ago(3h)
+| distinct UnderlayCreated, UnderlayName)
+on $left.cxUnderlayName == $right.UnderlayName
+| project-away UnderlayName
+| where cxUnderlayName != ''
+| sort by count_ desc
+
+UnderlayNodeInfo
+| where UnderlayName ==  'hcp-underlay-australiaeast-cx-56'
+| where PreciseTimeStamp > ago(3h)
+//| summarize arg_max(PreciseTimeStamp, UnderlayCreated, CPULoad1, CPULoad5, CPULoad15, MemTotal, K8sReady, K8sNetworkUnavailable, K8sMemoryPressure, K8sDiskPressure, K8sPIDPressure, CCPTotal, PodsTotal, Err) by HostName
+//| summarize arg_max(PreciseTimeStamp, UnderlayCreated) by HostName
+| distinct UnderlayCreated
+
+UnderlayNodeInfo
+//| where UnderlayName ==  'hcp-underlay-australiaeast-cx-56'
+| where PreciseTimeStamp > ago(3h)
+//| summarize arg_max(PreciseTimeStamp, UnderlayCreated, CPULoad1, CPULoad5, CPULoad15, MemTotal, K8sReady, K8sNetworkUnavailable, K8sMemoryPressure, K8sDiskPressure, K8sPIDPressure, CCPTotal, PodsTotal, Err) by HostName
+//| summarize arg_max(PreciseTimeStamp, UnderlayCreated) by HostName
+| distinct UnderlayCreated, UnderlayName

@@ -1,0 +1,275 @@
+/////////////////////////////////////////////////////
+// AKS provisioning QoS and error analysis in aks.AKSprod
+/////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////
+// Get inner error when failed to delete MC resource group
+///////////////////////////////////////////////////////////
+cluster("Aks").database("AKSprod").AsyncQoSEvents
+| where PreciseTimeStamp between (startofweek(datetime(2021-02-20)) .. endofweek(datetime(2021-02-20)))
+ and resultType == 2 
+ and resultCode == "DeleteResourceGroupError" 
+ and resultSubCode == "InternalOperationError" 
+//| extend DebugyQuery = strcat("union AsyncContextActivity, HcpAsyncContextActivity | where operationID == \"", operationID, "\"")
+| extend e=todynamic(errorDetails) | extend m=tostring(e.message)
+| extend e1=trim_end(".", substring(m, indexof(m, "Original Error: ") + 16)) | extend d=todynamic(substring(e1, indexof(e1, "Details=[") + 8)) 
+| extend m1=todynamic(tostring(d[0].Message)) // TODO, extrace error code from rest of array
+| extend code=tostring(m1.error.code)
+| project TIMESTAMP, errorDetails, code, e1, d, m1, resultCodeDependency,region, operationID, operationName, suboperationName, resultType, resultCode, resultSubCode
+| summarize count() by code
+| sort by count_ desc
+
+
+// Get inner error by day when failed to delete MC resource group
+cluster("Aks").database("AKSprod").AsyncQoSEvents
+| where PreciseTimeStamp > ago(360d)
+ and resultType == 2 
+ and resultCode == "DeleteResourceGroupError" 
+ and resultSubCode == "InternalOperationError" 
+//| extend DebugyQuery = strcat("union AsyncContextActivity, HcpAsyncContextActivity | where operationID == \"", operationID, "\"")
+| extend e=todynamic(errorDetails) | extend m=tostring(e.message)
+| extend e1=trim_end(".", substring(m, indexof(m, "Original Error: ") + 16)) | extend d=todynamic(substring(e1, indexof(e1, "Details=[") + 8)) 
+| extend m1=todynamic(tostring(d[0].Message)) // TODO, extrace error code from rest of array
+| extend code=tostring(m1.error.code)
+| project TIMESTAMP, errorDetails, code, e1, d, m1, resultCodeDependency,region, operationID, operationName, suboperationName, resultType, resultCode, resultSubCode
+| summarize count() by code, bin(TIMESTAMP, 1d)
+| render timechart 
+
+
+///////////////////////////////////////////////////////////
+// Runner latency
+///////////////////////////////////////////////////////////
+AsyncQoSEvents
+| where PreciseTimeStamp > ago(30d)
+| where result == "Succeeded"
+| where operationName contains "ManagedCluster" and suboperationName == "Creating"
+| summarize percentiles(latency / 60000., 80, 95) by isRunner = resourceGroupName !startswith_cs "aksrnr-", bin(TIMESTAMP, 1h)
+| extend OKR=5
+| render timechart with (series=isRunner)
+
+
+///////////////////////////////////////////////////////////
+// Debug errors for ONE sub and cluster
+///////////////////////////////////////////////////////////
+let subid='103f9b41-f726-46ba-9d75-0dc77a591b9f';
+let cluster='y2-fr-fmfi1-k8s-cluster1';
+union FrontEndContextActivity, AsyncContextActivity
+| where PreciseTimeStamp >= datetime(2019-09-19 00:00:00) and PreciseTimeStamp <= datetime(2019-09-28 23:59:59)
+| where subscriptionID == subid
+//| where resourceGroupName contains "CIRC-AZUR-DMZ-IGNITE"
+//| where operationName contains "PUT"
+| where resourceName == ['cluster']
+| extend Message = parse_json(msg)
+| where level != "info"
+| project operationID, PreciseTimeStamp, level, code=tostring(Message.code), suboperationName, msg, operationName, correlationID, region, fileName, resourceName, resourceGroupName, subscriptionID
+| join kind=leftouter  AsyncQoSEvents on subscriptionID, resourceGroupName, resourceName, operationName, suboperationName, operationID
+| sort by subscriptionID, resourceGroupName, resourceName, operationID, suboperationName, PreciseTimeStamp desc 
+
+
+// Provisioning errors for ONE subscription and operation
+union FrontEndContextActivity, AsyncContextActivity
+| where PreciseTimeStamp >= datetime(2019-09-19 00:00:00) and PreciseTimeStamp <= datetime(2019-09-26 23:59:59)
+| where subscriptionID contains "af1c88ae-c328-44f3-908b-608dfb0004d5"
+| where resourceGroupName contains "CIRC-AZUR-DMZ-IGNITE"
+| where resourceName contains "k8s-aresignite" 
+| where operationID contains "93ec4095-b869-4720-9383-a4117441bb70"
+| extend Message = parse_json(msg)
+| where operationName contains "PUT"
+| where level != "info"
+| project PreciseTimeStamp, level, code=tostring(Message.code), suboperationName, msg, operationName, operationID, correlationID, region, fileName, resourceName, resourceGroupName
+
+
+///////////////////////////////////////////////////////////
+// Deep investigation of latency
+// see which leg increased.
+///////////////////////////////////////////////////////////
+let start=ago(7d);
+let end=now();
+let operation="Creating";
+let percentile=95;
+let vmType="all";
+let timeUnit = iif((end-start)>48h, 1d, 1h);
+let operationIDs = (operation: string, start: datetime, end: datetime) {
+AsyncQoSEvents
+| where PreciseTimeStamp >= start and PreciseTimeStamp < end
+| where not(isTestSubscription(subscriptionID))
+| where not(isTestRegion(region))
+| where operationName contains "ManagedClusterHandler" and operationName !contains "OpenShift"
+| extend suboperation = replace(@'None', @'Deleting', suboperationName)
+| where suboperation == operation
+| where result == "Succeeded"
+| project PreciseTimeStamp, operationID
+};
+let operationIdRowsByVmType = (operation: string, start: datetime, end: datetime, vmType: string) {
+operationIDs(operation, start, end)
+| join kind=leftouter (FrontEndContextActivity
+| where PreciseTimeStamp >= start and PreciseTimeStamp < end
+| where not(isTestSubscription(subscriptionID))
+| where not(isTestRegion(region))
+| where msg contains "sanitized request body:"
+| extend vmtype = iif(msg contains '"type":"VirtualMachineScaleSets"', "vmss", "vmas")
+| where iif(vmType != "all", vmtype == vmType, true)
+) on operationID
+| project PreciseTimeStamp, operationID
+};
+let operationIdRows = operationIdRowsByVmType(operation, start, end, vmType);
+let LatencyBreakDown=(operation:string, startTime: datetime , endTime:datetime, unit:timespan) {
+operationIdRows
+| join (LatencyTraceEvent
+| where PreciseTimeStamp > startTime and PreciseTimeStamp <= endTime
+| where container == "containerserviceasync"
+| where Name == iif(operation == "Deleting", "DeleteManagedClusterAsyncOperation", "PutManagedClusterAsyncOperation")) on operationID
+| project SpanID
+| join (LatencyTraceEvent
+| where PreciseTimeStamp > startTime and PreciseTimeStamp <= endTime
+| where container == "containerserviceasync") on $left.SpanID == $right.ParentSpanID
+| extend Latency = Latency / 1000.0
+| summarize percentile_latency = percentiles(Latency, percentile), count() by bin(PreciseTimeStamp, unit), Name
+};
+let ValidateAgents=(startTime: datetime , endTime:datetime, unit:timespan) {
+operationIdRows
+| join (LatencyTraceEvent
+| where PreciseTimeStamp > startTime and PreciseTimeStamp <= endTime
+| where container == "containerserviceasync"
+| where Name == "ValidateAgents") on operationID
+| extend Latency = Latency / 1000.0
+| summarize percentile_latency = percentiles(Latency, percentile), count() by bin(PreciseTimeStamp, unit), Name
+};
+let validateAgents = ValidateAgents(start, end, timeUnit);
+let LatencyBreakDownTotal = LatencyBreakDown(operation, start, end, 200d);
+let majorLatencyName = LatencyBreakDownTotal
+| where percentile_latency > 1.0
+| project Name;
+let countOpByDay = operationIdRows
+| summarize count_op = count() by bin(PreciseTimeStamp, timeUnit);
+let LatencyByDay = LatencyBreakDown(operation, start, end, timeUnit)
+| join kind=inner countOpByDay on PreciseTimeStamp
+| where count_ > count_op / 20.0
+| project PreciseTimeStamp , Name, percentile_latency , count_, count_op;
+LatencyByDay
+| where Name !in (majorLatencyName)
+| summarize  percentile_latency=sum(percentile_latency) by PreciseTimeStamp
+| extend Name="Others"
+| union  (LatencyByDay
+| where Name in (majorLatencyName))
+| union (validateAgents | where Name == iif(operation == "Creating", "ValidateAgents", ""))
+| join kind=leftouter validateAgents on PreciseTimeStamp
+| extend percentile_latency = iff(operation == "Creating" and Name == "NewDeployment", percentile_latency - percentile_latency1 , percentile_latency )
+| project PreciseTimeStamp, Name, percentile_latency
+
+
+///////////////////////////////////////////////////////////
+// AllocationFailed error: vm capacity issue
+///////////////////////////////////////////////////////////
+cluster("Aks").database("AKSprod").AsyncQoSEvents
+| where PreciseTimeStamp between (ago(30d)..now())
+ and resultType == 1
+ and resultCode == "AllocationFailed"
+ and resultCodeDependency == "microsoft.compute/virtualmachines"
+| summarize FaultCount = count(), SubsCount = dcount(subscriptionID) by bin(PreciseTimeStamp, 1h)
+| render timechart
+
+// VM allocation failures in all regions
+cluster("Aks").database("AKSprod").AsyncQoSEvents
+| where PreciseTimeStamp > ago(60d)
+ and resultType == 1
+ and resultCode == "AllocationFailed"
+ and resultCodeDependency == "microsoft.compute/virtualmachines"
+| summarize count() by bin(PreciseTimeStamp, 1d), region
+| render timechart  
+
+cluster("Aks").database("AKSprod").AsyncQoSEvents
+| where PreciseTimeStamp > ago(30d) and resultType == 0 and suboperationName contains "creat"
+| summarize count() by bin(PreciseTimeStamp, 1d), region
+| render timechart  
+
+AsyncContextActivity
+| where TIMESTAMP > ago(3d) and msg contains "Underlay is found in retriever old api"
+| project RPTenant, msg
+
+FrontEndContextActivity
+| where PreciseTimeStamp >= ago(7d)
+| where msg contains "sanitized request body:"
+| extend vmtype = iif(msg contains '"type":"VirtualMachineScaleSets"', "vmss", "vmas")
+| summarize count() by vmtype
+
+
+
+AsyncQoSEvents
+| where PreciseTimeStamp > ago(7d)
+| where operationName == "PutManagedClusterHandler.PUT"
+| extend bag = todynamic(propertiesBag)
+| extend size = tostring(bag.agentpool_size_0)
+| where subscriptionID == '1adc902d-2621-40cb-8109-6ab72c2c26c8'
+| project subscriptionID, resourceName, bag, size
+
+
+AsyncQoSEvents
+| where operationName == "PutManagedClusterHandler.PUT" and suboperationName == 'Creating'
+| extend bag = todynamic(propertiesBag)
+| summarize count() by tobool(bag.aadEnabled)
+
+// VMStartTimeout errors
+AsyncQoSEvents
+| where PreciseTimeStamp > ago(7d)
+| where operationName == "PutManagedClusterHandler.PUT"
+| extend bag = todynamic(propertiesBag)
+| extend size = tostring(bag.agentpool_size_0)
+| where resultType == 2
+| where resultCode == "VMStartTimedOut"
+//| project resultType, result, resultCode, resultCodeDependency, resultSubCode, errorDetails
+| summarize count() by bin(PreciseTimeStamp, 1h),  region 
+| render timechart 
+
+
+HcpAsyncContextActivity
+| where PreciseTimeStamp between (datetime('2019-01-15T00:00:00Z')..datetime('2019-01-15T20:00:00Z'))
+| where hcpControlPlaneID == '5c3e35be4a1a18000140ddbc'
+| project PreciseTimeStamp, operationID, hcpControlPlaneID, msg
+
+// Get hcp logs for clusters with operationID '00000000-0000-0000-0000-000000000000'
+HcpAsyncContextActivity
+| where PreciseTimeStamp between (datetime('2019-01-15T15:00:00Z')..datetime('2019-01-15T20:00:00Z'))
+//| where operationID == "8dc74eab-37fe-43da-b9d1-b58d7c8c34c7"
+//| where hcpControlPlaneID == '5c3e35be4a1a18000140ddbc'
+| project PreciseTimeStamp, operationID, hcpControlPlaneID, msg
+| join kind = leftouter ( 
+  HcpAsyncContextActivity
+  | where PreciseTimeStamp between (datetime('2019-01-15T00:00:00Z')..datetime('2019-01-15T20:00:00Z'))
+  | where operationID == '00000000-0000-0000-0000-000000000000'
+  | distinct  hcpControlPlaneID
+) on hcpControlPlaneID
+| sort by hcpControlPlaneID, PreciseTimeStamp asc
+
+let history = 1d
+AsyncQoSEvents | where operationName contains "ManagedCluster" | where suboperationName == 'Creating'
+| where PreciseTimeStamp > ago(history)
+| where resultType == 2 
+| project TIMESTAMP, region, subscriptionID, operationID, result, resultType 
+| join kind=leftouter (
+    normalizedHcpSyncContextActivity(history)
+    | project operationID, level_sync=level, msg_hcp_sync=msg, source_sync=source, pod, loc_sync=strcat(fileName, ":", lineNumber), namespace
+) on operationID
+| join kind=leftouter (
+  HcpAsyncContextActivity | where PreciseTimeStamp > ago(history)
+  | project operationID, msg_hcp_async=msg, Host, serviceBuild, source_async=source, pod, level_async=level, loc_async=strcat(fileName, ":", lineNumber)
+) on operationID
+
+
+
+//====================================
+// CCP Logs
+//====================================
+let ccpNS = '5f409a76e74f060001d2fac4'; // Morgan Stanley // '5f234b78546c8e0001c34be2' // stradigi
+union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, ControlPlaneEvents
+| where PreciseTimeStamp >= ago(24h)
+| where ccpNamespace == ccpNS
+| where category == 'kube-audit'
+| extend event=parse_json(tostring(parse_json(properties).log))
+| where event.stage == "ResponseComplete"
+| where event.verb != "watch"
+| where event.responseStatus.code == "200"
+// | where event.user.username == "system:serviceaccount:kube-system:kube-proxy"
+// | where event.user.username == "nodeclient"
+| extend lat=datetime_diff('Millisecond', todatetime(event.stageTimestamp), todatetime(event.requestReceivedTimestamp))
+| summarize percentiles(lat, 99, 90, 50) by tostring(event.verb)

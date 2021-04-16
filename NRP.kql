@@ -1,0 +1,14 @@
+﻿
+// Find out what NRP release each region is at
+//
+let release_number = "150"; //Use this to filter for the regions containing NRP release number. Leave it blank to see all releases/regions.
+cluster("nrp").database('binrp').NRP_Deployment_Region_Sequence
+| join kind = leftouter 
+    (cluster("nrp").database('mdsnrp').GatewayServiceQosEtwEvent  
+        | where TIMESTAMP > ago(1h)
+        | project  Tenant, SourceAssemblyFileVersion
+        | summarize by Tenant, assembly = strcat(substring(SourceAssemblyFileVersion, 0, 24), ")"))
+  on $left.Tenant == $right.Tenant
+| project  Region, RegionNumber, assembly
+| order by RegionNumber asc
+

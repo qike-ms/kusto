@@ -1,0 +1,48 @@
+Follow this wiki to build:
+https://msazure.visualstudio.com/CloudNativeCompute/_wiki/wikis/CloudNativeCompute.wiki/17156/Use-HCP-Debug
+
+# Examples:
+`hcp -l brazilsouth -i 5e66748a3c8b9d00010bded7`
+
+# Choose overlay cluster to debug customer's cluster
+>> kubectl: connect to overlay cluster
+
+# enter a node
+`~/downloads/kubectl-node_shell <node id>`
+
+# list all file descriptors of all processes
+# without -l to get a glance, sometimes too many fd can kill the performance and result in ingress errors
+# since no port can be opened.
+`ls /proc/*/fd`
+
+`ls -l /proc/*/fd`
+
+# Get all running containers
+`docker ps`
+
+# Show all cgrups and procs running in them in a tree-view:
+`systemd-cgls`
+`systemd-cgls | grep -C 10 109148`   # To grep a given process id
+
+# system logs
+`journalctl -k` # equivalent to `dmesg` # Kernel messages
+
+`grep "failed to read pod IP from plugin/docker" /var/log/syslog*`    # messages.1 seems to have same content as syslog.1
+
+`journalctl _COMM=kubelet`  # Get kubelet logs
+`journalctl -b`  # Get log since reboot
+`journalctl -a`
+`journalctl --disk-usage`
+`journalctl --no-pager`  # Do not display page by page. This allows redirects or grep
+`journalctl -n 10`  # output last 10 lines
+` journalctl -p 3 -x`   # -p(riority) 3 --> err only,  -x --> extra message
+
+`journalctl _COMM=kubelet --no-pager | grep -C 2 E04`   # To get all errors from kubelet
+`journalctl _COMM=kubelet --no-pager | grep W04`        # To get all warnings from kubelet
+
+# To get what other processes logged
+`journalctl | cut -d' ' -f5 | grep -Ev 'kernel|audit|CRON|systemd|sshd|sudo|su\[|dockerd|kubelet'`
+
+# Other useful commands
+timedatectl
+
