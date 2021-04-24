@@ -202,6 +202,10 @@ cluster('vmainsight').database('vmadb').VMA
 | take 1
 
 
+cluster('vmainsight').database('Air').
+GetAzureCoreRCA(ago(6h),ago(1h), "d3445265-eef0-4cf5-9adb-7abe22f2e180")
+
+
 
 //////////    AzureCM        //////////////
 cluster('azurecm').database('AzureCM').NodeStateChangeDurationDetails
