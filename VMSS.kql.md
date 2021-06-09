@@ -45,6 +45,18 @@ cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 | summarize count() by operationName, bin(PreciseTimeStamp, 1d)  // userAgent 
 | render stackedareachart   
 
+[query](https://dataexplorer.azure.com/clusters/azcrp/databases/crp_allprod?query=H4sIAAAAAAAAA12OuwrCQBBFe79iSJWAhdpZRBAVq/ggIa2sm8EsZB/MzhoifrwbiyB2l8u5j7rYOnW1/vBEw7M39C0SwoVQKo+V0liy0A42IB42XS+abGIIfei4GhxCnsPq17eBJB7JBncSGsGzIPa94haSYndLJhSJLO2Rheo8SGuiMB6SuijHxLjenAOPvA9aC1IvjFgwnGZwH+CuTPr/dA7L70dC0yABR1+2sewDtf5hPugAAAA=)
+
+VMApiQosEvent
+| where PreciseTimeStamp > ago(90d)
+| where resultType == 2
+| where resourceGroupName startswith "MC_"
+| where errorDetails contains "VMStartTimedOut"
+| summarize count() by bin(PreciseTimeStamp, 1d)
+| render timechart 
+
+
+
 // Ratio
 cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 | where PreciseTimeStamp > ago(14d)
