@@ -153,7 +153,23 @@ cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
 | evaluate pivot(operationName)
 | where "VirtualMachines.ForceDelete.DELETE" != "0"
 
-
+let ForceDeletedRegions = cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(30d)
+| where operationName == 'VirtualMachines.ForceDelete.DELETE'
+| where region !contains "validation"
+| distinct region;
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(30d)
+| where operationName == 'VirtualMachines.ForceDelete.DELETE' or operationName =='VirtualMachines.ResourceOperation.DELETE'
+| where region !contains "validation"
+| where resultType == 0  // No error
+| extend forceDelete = iff(operationName == 'VirtualMachines.ForceDelete.DELETE', 'ForceDelete' , 'Delete')
+| project PreciseTimeStamp, forceDelete, region, e2EDurationInMilliseconds
+| summarize count(), percentiles(e2EDurationInMilliseconds / 1000, 50, 90, 99) by  forceDelete, region
+| join kind=rightouter  ForceDeletedRegions on region | project-away region1
+| evaluate pivot(forceDelete)
+| sort by region
+| project-reorder region, ForceDelete, Delete, *
 
 ///////////////////////////////////////////////
 // Specific errors noted in the past
