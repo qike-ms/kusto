@@ -307,3 +307,13 @@ union cluster('aks').database('AKSccplogs').ControlPlaneEventsNonShoebox, Contro
 | where ccpNamespace == ccpNS
 | where category == 'kube-audit'
 | extend event=parse_json(tostring(parse_json(properties).log))
+
+//
+// Get default storage class not found clusters
+//
+union cluster('Aks').database('AKSccplogs').ControlPlaneEvents, cluster('Aks').database('AKSccplogs').ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp > datetime(2021-03-01 23:00:00.00) and PreciseTimeStamp <= datetime(2021-03-02 21:00:00.00)
+| where category contains "kube-controller-manager"
+| where RPTenant in ("brazilsouth", "brazilsoutheast", "centralindia", "centralus", "eastus", "eastus2", "francecentral", "francesouth", "germanynorth", "germanywestcentral", "koreacentral", "koreasouth", "northcentralus", "norwayeast", "norwaywest", "southafricanorth", "southcentralus", "southindia", "switzerlandnorth", "switzerlandwest", "uaenorth", "westus", "westus2")
+| where properties contains "storageclass.storage.k8s.io \\\"default\\\" not found"
+| summarize dcount(ccpNamespace)
