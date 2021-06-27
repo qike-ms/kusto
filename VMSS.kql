@@ -139,20 +139,9 @@ cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
 //////////////////////////////////////////////////////////////////////////
 //Force Delete latency @CRP level
 //////////////////////////////////////////////////////////////////////////
-cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
-| where PreciseTimeStamp > ago(30d)
-| where operationName == 'VirtualMachines.ForceDelete.DELETE' or operationName =='VirtualMachines.ResourceOperation.DELETE'
-| where region !contains "validation"
-//|where subscriptionId == 'bad9a825-faff-4cf5-b6cf-4a4fcb1d5843' // Snowflake's sub
-| summarize count(), percentiles(e2EDurationInMilliseconds / 1000, 50, 90, 99) by  operationName, region//, correlationId
 
-cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
-| where PreciseTimeStamp > ago(30d)
-| where operationName == 'VirtualMachines.ForceDelete.DELETE' or operationName =='VirtualMachines.ResourceOperation.DELETE'
-| distinct operationName, region
-| evaluate pivot(operationName)
-| where "VirtualMachines.ForceDelete.DELETE" != "0"
-
+// Get _VM_ only delete and forcedelete latency
+// pivot by region with forcedelete
 let ForceDeletedRegions = cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
 | where PreciseTimeStamp > ago(30d)
 | where operationName == 'VirtualMachines.ForceDelete.DELETE'
@@ -160,16 +149,79 @@ let ForceDeletedRegions = cluster('azcrp.kusto.windows.net').database('crp_allpr
 | distinct region;
 cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
 | where PreciseTimeStamp > ago(30d)
-| where operationName == 'VirtualMachines.ForceDelete.DELETE' or operationName =='VirtualMachines.ResourceOperation.DELETE'
+| where operationName == 'VirtualMachines.ForceDelete.DELETE' or operationName =='VirtualMachines.ResourceOperation.DELETE'  // These two are largest vm deletion operations
 | where region !contains "validation"
-| where resultType == 0  // No error
+| where resultType == 0 and e2EDurationInMilliseconds > 1000 // success with over 1 sec latency
 | extend forceDelete = iff(operationName == 'VirtualMachines.ForceDelete.DELETE', 'ForceDelete' , 'Delete')
-| project PreciseTimeStamp, forceDelete, region, e2EDurationInMilliseconds
-| summarize count(), percentiles(e2EDurationInMilliseconds / 1000, 50, 90, 99) by  forceDelete, region
+| project PreciseTimeStamp, forceDelete, region, e2eSeconds = e2EDurationInMilliseconds / 1000
+| summarize count(), percentiles(e2eSeconds, 50, 90, 99) by  forceDelete, region
 | join kind=rightouter  ForceDeletedRegions on region | project-away region1
 | evaluate pivot(forceDelete)
 | sort by region
 | project-reorder region, ForceDelete, Delete, *
+
+// Get _VM_ only delete and forcedelete latency only in EastUS2EUAP
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(30d)
+| where operationName == 'VirtualMachines.ForceDelete.DELETE' or operationName =='VirtualMachines.ResourceOperation.DELETE'
+| where region == 'EastUS2EUAP'
+| where resultType == 0 and e2EDurationInMilliseconds > 1000 // success with over 1 sec latency
+//| where subscriptionId == '596c744d-c8b7-40bb-84a7-81a923b5643e' //CRP test sub
+| extend forceDelete = iff(operationName == 'VirtualMachines.ForceDelete.DELETE', 'ForceDelete' , 'Delete')
+| project PreciseTimeStamp, forceDelete, region, e2eSeconds = e2EDurationInMilliseconds / 1000
+| summarize count(), percentiles(e2eSeconds, 50, 90, 99) by  forceDelete
+
+// Get _VMSS_ only delete and forcedelete latency in EastUS2EUAP
+// Excluding the two largest delete operations: 'VirtualMachines.ForceDelete.DELETE', 'VirtualMachines.ResourceOperation.DELETE' 
+// Why so many names for VMSS deletion?
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(30d)
+| where operationName in ('VirtualMachineScaleSets.ForceDelete.DELETE', 'VMScaleSetVMs.ForceDelete.DELETE', 'VirtualMachineScaleSets.ForceDelete.POST')
+  or operationName in ('VirtualMachineScaleSets.ResourceOperation.DELETE', 'VirtualMachineScaleSets.Delete.POST',  
+    'VirtualMachineScaleSets.SaveVMStateAndDelete.DELETE', 'VMScaleSetVMs.VMScaleSetVMsOperation.DELETE', 'VMScaleSetConvergedVMs.VMScaleSetConvergedVMOperation.DELETE')
+| where region == 'EastUS2EUAP'
+| where resultType == 0 and e2EDurationInMilliseconds > 1000 // success with over 1 sec latency
+| extend forceDelete = iff(operationName contains 'forcedelete', 'ForceDelete' , 'Delete')
+| project PreciseTimeStamp, forceDelete, region, e2eSeconds = e2EDurationInMilliseconds / 1000
+| summarize count(), percentiles(e2eSeconds, 50, 90, 99) by  forceDelete
+
+
+// Get delete and forcedelete latency of ALL "delete" and "forcedelete" in Eastus2EUAP
+// Add operationName in summary
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(30d)
+| where operationName contains 'delete'   // All deletes, not just vm
+| where region == 'EastUS2EUAP'
+| where resultType == 0 and e2EDurationInMilliseconds > 1000 // success with over 1 sec latency
+| extend forceDelete = iff(operationName contains 'forcedelete', 'ForceDelete' , 'Delete')
+| project PreciseTimeStamp, forceDelete, operationName, region, e2eSeconds = e2EDurationInMilliseconds / 1000
+| summarize count(), percentiles(e2eSeconds, 50, 90, 99) by  forceDelete, operationName 
+
+
+// AB testing of force delete performed by CRP team.
+// Only measure EastUS2EUAP and in the two given subs
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(7d)
+| where subscriptionId in ("596c744d-c8b7-40bb-84a7-81a923b5643e", "c712b2c6-fae0-434c-86b4-df898c6d9720")
+| where operationName contains 'delete'
+| where region == 'EastUS2EUAP'
+| where resultType == 0
+| extend forceDelete = iff(operationName contains 'forcedelete', 'ForceDelete' , 'Delete')
+| project PreciseTimeStamp, forceDelete, operationName, region, e2eSeconds = e2EDurationInMilliseconds / 1000
+| where e2eSeconds > 1
+| summarize count(), percentiles(e2eSeconds, 50, 90, 99) by operationName, forceDelete
+| order by operationName, forceDelete
+
+// AB testing of force delete on VmssQoSEvent table
+//
+VmssQoSEvent
+| where PreciseTimeStamp < ago(2h) and PreciseTimeStamp  > ago(7d) 
+| where operationName contains "delete" 
+| where subscriptionId in ("596c744d-c8b7-40bb-84a7-81a923b5643e", "c712b2c6-fae0-434c-86b4-df898c6d9720")
+and  MonitoringApplication has "eastus2euap" and oSType == "Linux"
+| extend force = operationName contains 'ForceDelete'
+| summarize percentile(P99sec = e2EDurationSeconds, 99.9), percentile(P90seconds = e2EDurationSeconds, 99), percentile(P50seconds = e2EDurationSeconds, 50), avg(e2EDurationSeconds), count() by force
+
 
 ///////////////////////////////////////////////
 // Specific errors noted in the past
