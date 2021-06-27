@@ -14,7 +14,7 @@
 // To filter CAS and cloud provider calls: userAgent contains 'cluster-autoscaler' or userAgent contains 'kubernetes-cloudprovider'
 
 /////////////////////////////////////
-// All VMSS VM Creation CSE errors
+// All VMSS VM Creation CSE errors //
 /////////////////////////////////////
 // Errors are defined in: https://github.com/Azure/AgentBaker/blob/master/parts/linux/cloud-init/artifacts/cse_helpers.sh
 // ERR_OUTBOUND_CONN_FAIL=50 {{/* Unable to establish outbound connection */}}
@@ -35,9 +35,35 @@ cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 | summarize count() by status, bin(PreciseTimeStamp, 1d)
 | render timechart 
 
+
+/////////////////////////////////////
+// All Cloud Provider errors.      //
+/////////////////////////////////////
+// resultType: 0:success, 1: usererror, 2: system error
+// Cloud Provider errors for disk ops
+ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(90d)
+| where resourceName startswith 'aks'  
+| where userAgent contains_cs "kubernetes-cloudprovider"
+| where resultType != 0
+| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
+| summarize count() by day = bin(PreciseTimeStamp, 1d), resultType, resultCode
+| render timechart  with (series=resultType,resultCode)
+
+// Cloud Provider errors excluding disk ops
+ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(90d)
+| where resourceName startswith 'aks' 
+| where userAgent contains_cs "kubernetes-cloudprovider"
+| where resultType != 0
+| where labels !contains_cs "DiskAttached" and labels !contains_cs "DiskDetached"
+| summarize count() by day = bin(PreciseTimeStamp, 1d), resultType, resultCode
+| render timechart  with (series=resultType,resultCode)
+
+
 ////////////////////////////////////
-// VMStartTimeOut
-///////////////////////////////////
+// VMStartTimeOut                ///
+////////////////////////////////////
 cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 | where PreciseTimeStamp > ago(14d)
 | where resourceName startswith 'aks'
@@ -93,25 +119,25 @@ cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 ///////////////////////////////////
 
 
-/////////////////////////////////////
-// All non-GET non user errors
 ////////////////////////////////////
-cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
-| where PreciseTimeStamp > ago(14d)
-| where resourceName startswith 'aks'
+// All non-GET Non user errors.   //
+////////////////////////////////////
+ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(90d)
+| where resourceName startswith 'aks' 
 | where resultType == 2
-| summarize count() by resultCode, bin(PreciseTimeStamp, 1d)
-| render timechart  
+| summarize count() by day = bin(PreciseTimeStamp, 1d), resultType, resultCode
+| render timechart  with (series=resultType,resultCode)
 
 /////////////////////////////////////
-// All non-GET user errors
+// All non-GET User errors
 ////////////////////////////////////
 cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 | where PreciseTimeStamp > ago(14d)
 | where resourceName startswith 'aks'
 | where resultType == 1
-| summarize count() by resultCode, bin(PreciseTimeStamp, 1d)
-| render timechart  
+| summarize count() by day = bin(PreciseTimeStamp, 1d), resultType, resultCode
+| render timechart  with (series=resultType,resultCode)
 
 /////////////////////////////////////
 // All non-GET InternalExecutionError errors, seen spike when outage
