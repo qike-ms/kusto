@@ -1,0 +1,71 @@
+// cluster("aks").database("AKSprod")
+
+
+GitOpsFlux
+| where TIMESTAMP >= ago(1h) and TIMESTAMP <= ago(10m)
+| extend GitCommit=tostring(parse_json(log).HEAD)
+| summarize arg_max(TIMESTAMP, *) by Environment, UnderlayName, RPTenant
+
+// All Cx underlays in a region
+let RPTENANT = "eastus";
+UnderlayMonitoring
+| where RPTenant == RPTENANT
+| summarize arg_max(TIMESTAMP, *) by underlayName, RPTenant
+| where not(underlayQuarantined)
+| distinct underlayName, RPTenant
+| project UnderlayName=underlayName, RPTenant;
+
+// All svc underlays in a region
+let RPTENANT = "eastus";
+AsyncQoSEvents
+| where RPTenant == RPTENANT
+| summarize arg_max(TIMESTAMP, *) by UnderlayName, RPTenant
+| distinct UnderlayName, RPTenant
+
+
+// All underlays in a region
+let RPTENANT = "eastus";
+let allCxUnderlays = 
+UnderlayMonitoring
+| where RPTenant == RPTENANT
+| summarize arg_max(TIMESTAMP, *) by underlayName, RPTenant
+| where not(underlayQuarantined)
+| distinct underlayName, RPTenant
+| project UnderlayName=underlayName, RPTenant;
+let allSvcUnderalys =
+AsyncQoSEvents
+| where RPTenant == RPTENANT
+| summarize arg_max(TIMESTAMP, *) by UnderlayName, RPTenant
+| distinct UnderlayName, RPTenant;
+allSvcUnderalys | union allCxUnderlays
+| summarize TotalUnderlayCount=count() by RPTenant
+
+
+let RPTENANT = "eastus";
+let ENVIRONMENT = "prod";
+let allCxUnderlays = 
+UnderlayMonitoring
+| where RPTenant == RPTENANT
+| summarize arg_max(TIMESTAMP, *) by underlayName, RPTenant
+| where not(underlayQuarantined)
+| distinct underlayName, RPTenant
+| project UnderlayName=underlayName, RPTenant;
+let allSvcUnderalys =
+AsyncQoSEvents
+| where RPTenant == RPTENANT
+| summarize arg_max(TIMESTAMP, *) by UnderlayName, RPTenant
+| distinct UnderlayName, RPTenant;
+let allUnderlays = allSvcUnderalys | union allCxUnderlays;
+let underlayCountByRegion = 
+allUnderlays | summarize TotalUnderlayCount=count() by RPTenant;
+GitOpsFlux
+| where TIMESTAMP >= ago(1h) and TIMESTAMP <= ago(10m)
+| where RPTenant == RPTENANT and Environment == ENVIRONMENT
+| extend GitCommit=tostring(parse_json(log).HEAD)
+| where GitCommit != ""
+| summarize arg_max(TIMESTAMP, *) by Environment, UnderlayName, RPTenant
+| distinct Environment, UnderlayName, GitCommit, RPTenant
+| join kind=leftsemi allUnderlays on RPTenant, UnderlayName
+| summarize Count=count() by RPTenant, GitCommit
+| join kind=inner underlayCountByRegion on RPTenant
+| summarize percentHealthy=todouble(min(Count*100/TotalUnderlayCount))
