@@ -1,0 +1,12 @@
+cluster('vmainsight').database('Air').
+AksPingFailures
+| where EventTime between(ago(11d)..ago(1d)) and RCALevel1 !in ("VmReboot") and RCALevel2 !in ("ContainerStateDestroyed", "ToBeDestroyedOnNode")
+| project RCALevel1, RCALevel2, RCA=case(RCALevel2 contains "spinlock", "HostNet - SpinLockIssue",
+                                         RCALevel1 == "HostNetworkingUpdate", "HostNet - Updates",
+                                         RCALevel2 contains "HighInterfaceDiscards", "HostNet - PacketDiscards",
+                                         RCALevel1 contains "AzureProfiler" or RCALevel1 == "HighCpu","Noisy Neighbor/High CPU/Host Issue",
+                                         RCALevel1 in ("UnexpectedNodeState", "UnexpectedContainerState", 
+                                         "UnexpectedVmHealthState", "UnexpectedContainerOsState", "UnexpectedContainerOperationalState"),"Unknown",
+                                         RCALevel1)
+| summarize count() by RCA
+| render piechart 
