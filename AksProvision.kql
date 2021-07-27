@@ -255,6 +255,16 @@ AsyncQoSEvents | where operationName contains "ManagedCluster" | where suboperat
   | project operationID, msg_hcp_async=msg, Host, serviceBuild, source_async=source, pod, level_async=level, loc_async=strcat(fileName, ":", lineNumber)
 ) on operationID
 
+// Get ReconcileMSICredentialError errors
+AsyncQoSEvents
+| where TIMESTAMP > ago(30d)
+| where not(isTestSubscription(subscriptionID))
+| where operationName == "PutManagedClusterHandler.PUT"
+| where suboperationName == 'Creating'
+| where resultType != 1
+| where resultSubCode == 'ReconcileMSICredentialError'
+| summarize count() by bin(TIMESTAMP, 1d), region
+| render timechart with (series=region)
 
 
 //====================================
