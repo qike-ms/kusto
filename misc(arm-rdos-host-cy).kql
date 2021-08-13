@@ -1,11 +1,52 @@
+////////////////////////////////////////////////
+/////// Find out when user cluster was touched 
+////////////////////////////////////////////////
 
 
-/////////////////////////
-// JIT audit
-/////////////////////////
+/////// Find out when nsenter were created /////
+
+https://dataexplorer.azure.com/clusters/aks/databases/AKSccplogs?query=H4sIAAAAAAAAA31Sy27bMBC8+ysIX2QBkvWI/Dq4gOsGgZE+Ars9BxS5kulIpEpSbgz047tSbMlI0lwkYGd2dna4tRRKkrWSVqvioaASbo8grfHelr4rudsrSNXz4C/5swcN5EEDEwZ+ihJ2lpYV+URorkbJ3h0EwYWkwahaM9hwsqeGOIGpU8O0qCyONsFNRHm6SKnPKWd+MpvP/DlkM5+xJJuG2SK+mUJw0ci1qisT3K8+b7Zff3y5u/W3d0Gl1VFw0Cb4JphWRmV23NinQoLegT4KBkFJJc2Br4va2IZ6JbG638XOlWFJSzAVZUDYi4ohwwmwSchZFM/SbDINwzCaxmEynw+v+tBHBdoKMH2jI3Tl89QvaTPWP6jUP1eYsGCsH4dxFEWLaDJJksjX86fy4Aw+Uhxu0RwGB2tVVgVYGH5MDyrFTYB8iQYaLjxbkPxCPpElsYqfcGnBRr2C2zNpzYVFWkW1gceDUXJklbFayPzScBoXKnebHiwcgNk3p+ER9OERRi3kSp88PIvfNQbwa7tZdmrtpHGPuB45gk5fE5oaQsZSWxsEhbRd60s2uxYaM8UBibUBvcoxgNdCHXAmvYe3n+YkXK9A85Kdlhz/Fhd75CLLRk4pigJXxci54zVhnuGzCNrM2xxMk4P7DuO88BYYiCPwnovkltG9cLM5EZKMHKYBRRyXdFi3zNXjP9UpPkbRn0if7X9P5B/Bvt3rEwQAAA==
+
+union ControlPlaneEvents,ControlPlaneEventsNonShoebox
+| where PreciseTimeStamp > ago(4h)
+//| where resourceId has '/subscriptions/31adb9ba-dadc-4787-8ef7-cc4f60f9236e/resourcegroups/KABIRLODGE-RG/providers/Microsoft.ContainerService/managedClusters/KABIRLODGE-AKS2'
+//| where namespace contains "5ec50dc127bf560001620488"
+//| where properties contains 'irp-db-master-job-irp-db-citest-2021119155441-r8kmj'
+| where properties contains "ResponseComplete"
+| where properties contains "/pods/nsenter"
+| extend property = todynamic(properties)
+| extend audit = parse_json(tostring(property.log))
+| project PreciseTimeStamp, pod, category, requestURI=tostring(audit.requestURI), verb=tostring(audit.verb), status=toint(audit.responseStatus.code), userAgent=tostring(audit.userAgent), user=tostring(audit.user.username),latency=datetime_diff('millisecond', todatetime(audit.stageTimestamp), todatetime(audit.requestReceivedTimestamp)), audit
+| where verb in ('create') 
+| where userAgent contains "kubectl"
+| where requestURI contains "/pods/nsenter"
+
+
+/////////// JIT audit  /////////////////////////
+https://dataexplorer.azure.com/clusters/aks/databases/AKSprod?query=H4sIAAAAAAAAA21P20rDQBB971fMU5NAamNUpMUIAfsQtVCa+AHb3SOuJJuwO4lE/Hg3RamoMA9zZjg3WfeOYcNAvPcWrhZNEJ0pweIgHMLgvqg8znulefZBby+woJ2F1A6VblCyaDq6zcgzwP4Qpkl6vkiuF+mKkmR9ma6TJCJh1F/Wzb+k9GJ9tfITzZbLb8Oj/WaA4WrsQFlGQdlLCSio4BRLWNHAd3EkW8NCG0fBHq7trcREzErUz4sSdtAS8wl87cdn/lDOcy/q3CMG1FmuGm20Yyu4tZNLZ9tXSKaq2G7KKt/uYqpghOGYnhxsoXw+zWP8I0hMd77iVDn+VcLrudYyHcaT3iebSdwBiwEAAA==
+
 cluster('azureslam').database('JIT').Audit
-| where TIMESTAMP > ago(7d)
-| where UserIdentity in ('qike@ame.gbl', 'weinongw@ame.gbl')
+| where PreciseTimeStamp >= datetime(2021-07-29 00:42:00) and PreciseTimeStamp < datetime(2021-07-29 23:59:59)
+//| where AuditEventType == 'Succeeded'
+| where Parameters contains 'ResourceType=Self-Service&SelfServiceType=AKS&AccessLevel=Administrator'
+| project TIMESTAMP, Tenant, UserIdentity, Parameters, DateTime, AuditEventType
+| sort by TIMESTAMP
+
+
+/////////// AKSProd Trace table /////////////////////////
+
+https://dataexplorer.azure.com/clusters/aks/databases/AKSprod?query=H4sIAAAAAAAAA32QwU7DMBBE73zF4hOVUsU1INSIwAEuOSCh0n6AcVax28QO602REB+P1UpJpVZIPu3Om5l15U3onG9W+DVg5DVpg1e/8G2REN4JjYu4dh1+sO56eCqh1oycBjdKqsVcPszVEqQs7lQh5Qy0r8+px4uQui3ul+nNxjivO4x9KgBlCWLr2Ca7FkmMijh8RkOuZxd89QrXSSYOmaypQd6sqsMst6hbtj/HXSrBQ3wJNR6B0W2CTPCsnY8JbUh7ft5EpFLkOQS6LCOMod2j+EewDzucwk5apOuUlGnTU9ii4bMfyybLDCxz/4ZsQ52dmCSa9Q5hIf8A0bJZYMIBAAA=
+
+IncomingRequestTrace
+| where PreciseTimeStamp >= datetime(2021-07-29 00:42:00) and PreciseTimeStamp < datetime(2021-07-29 23:59:59)
+| where namespace == "jithandler"
+| where subscriptionID != "" and targetURI != "/healthz" and StatusCode != ""
+| where targetURI contains "/grant?User="// or targetURI contains "/resolve" or targetURI contains "/revoke"
+| where StatusCode == 200
+| project PreciseTimeStamp, targetURI, httpMethod, StatusCode
+| take 10
+
+
 
 /////////////////////////
 // ARM
