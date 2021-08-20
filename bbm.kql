@@ -1,4 +1,30 @@
-﻿// Last updated: 1/13/2020
+﻿// Last updated: 8/20/2021
+
+// Get min, max time and subid and rg for a given cluster namespace
+//
+let ['_id']='611ba62d62d7a400011b95f7';
+cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+| where ccpNamespace == ['_id']
+| summarize min(PreciseTimeStamp), max(PreciseTimeStamp) by subscriptionID, managedResourceGroupName
+
+// Get the above but in individual scalar values
+let ['_id']='611ba62d62d7a400011b95f7';
+let test_start = cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+| where ccpNamespace == ['_id']
+| summarize min(PreciseTimeStamp)
+| summarize by min_PreciseTimeStamp;
+let test_end = cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+| where ccpNamespace == ['_id']
+| summarize max(PreciseTimeStamp)
+| summarize by max_PreciseTimeStamp;
+let temp_subscription_id = cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+| where ccpNamespace == ['_id']
+| summarize by subscriptionID;
+let temp_resource_group = cluster('aks').database('AKSprod').BlackboxMonitoringActivity
+| where ccpNamespace == ['_id']
+| summarize by managedResourceGroupName;
+print start=toscalar(test_start), end=toscalar(test_end), subscription_id = toscalar(temp_subscription_id), resource_group = toscalar(temp_resource_group)
+
 
 
 // Get activities of all cluster on a given underlay
