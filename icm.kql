@@ -15,6 +15,25 @@
 //   Name: AZUREKUBERNETESSERVICE\ClusterAutoscaler  Id: 74068
 ///////////////////////////////////////////////////////////////////////
 
+// sev1 impacted AKS
+// https://dataexplorer.azure.com/clusters/icmcluster/databases/IcmDataWarehouse?query=H4sIAAAAAAAAA41STU/cMBC98yvmFgeFjYBCpRXpZTkQiW2lslKPaLBns0NjO7In0FT98fUmXQjlgk/jefPx3rN120ehoDLWVk9xli8MCj5gJJXVen2dLj8w0M73kRJYO82GnMQ7h13ceVH50R943lEgWAVCodRB8AWw8er88sK8wnf0RIFlgKsKTgGdgTp+6wUbgqoCCT2l0thbi4F/E2Bo7i3+UmtveMtk9nMLOM7hYYADi9qklkfPDtQRpPOStx1qIbMhh4nriB1oTLna7JeenV18+pyPsHdvp3bBP5KWmagCJrbT8Nukpi3gu/eywuRNbRL+7Ng1G0L7FW2qf0dTvdZH+KjY2QrI9zxniXdEx85q64NFuU8vScKW1FxENgwn6/WJMXBzs7R2GWOWF6MFG5aWpvA/JWNuldobH4bijdW37H5WUYJGUdlOpIvLsux8EGwXlnXw0W8l/a+F9rZk25VP5yUfPlFpSJDbWGZzs/7RuaaoA3fC3v0F/NTop6kCAAA=
+
+cluster('icmcluster').database('IcMDataWarehouse').IncidentsSnapshot()
+| where CreateDate > ago(365d)
+| where Severity <= 1 and IsOutage == true
+| summarize arg_max(ModifiedDate, *) by IncidentId
+| join (
+    IncidentImpactedTenants
+    | where TenantId == 22547)
+    on IncidentId
+| project CreateDate, OutageImpactLevel, RootCauseId, OwningTeamName, IncidentId
+| join( RootCauses | summarize arg_max(ModifiedDate, *) by RootCauseId ) on RootCauseId
+| project CreatedDate=format_datetime(CreateDate, 'yy-MM-dd HH:mm:ss'),
+    Title,
+    OwningTeamName,
+    Category,
+    IncidentLink=strcat('https://portal.microsofticm.com/imp/v3/incidents/details/', IncidentId),
+    Description
 
 //
 // Weekly Created CRI count
