@@ -2,6 +2,57 @@
 // AKS provisioning QoS and error analysis
 ////////////////////////////////////////////
 
+// https://dataexplorer.azure.com/clusters/aks/databases/AKSprod?query=H4sIAAAAAAAAA+1WS2/jNhC+51cMdLEMqHGLPbuAX2mNQokaKXsNaHFiM5FILR9JXOyP75BKZNlZF1htDz30YJiaGX7DmflmyMkEfkMLrtlqxhFQa6UNbPagkRklL8rKGYs6HrEnMxpfcmbZhhmMR7M/8kYrTrKZ2cvyT5WvnlFac/EVXnaoEYp1usqLWZrBr1NgWxV/+pmPO61UNhamQGNztzGlFo0VSsam97Fejg/2wmTkbSWfY/oJrWRNzr4Fd4tbD6TD3xHA7MncNKhZcKTeV9esxlMcssz3PeNSaY0V+3Aob+0MZhqfBb5cIbNOY0xpoZ1WoJmzbc/6SA6lkpYJaSD6LLR1rEpZuRMS85JVmKM1UbdRo3GVLfYNwnQK0S8HDaXrKJAealvRaDKByBAkLXoiLy2pwjYKS9dQXUl+JO6kbyJSkl8K4hFLC53b9TKBNtkJHJ0l+XC6pBdJArdZgZJJ+y5dKN5ZECf6n369xAYlR1nuEyiZxa3S4i/kK0/YzvxU8U+bFu03aQzqZ1Hi3ImKf7QjohfI6uRA6C79x7n3tcmcTZlkW+SLtnF+Z5JXqC+zuyK6mEy+UlLqmnl0qpWTNh63zeYTGPQt8vlAghvPgDNAZ1N5Pv4B6ST/VjXwyfsM7u9J8qiEhPj/ifEfnBhjUPKYEL1exra2BF75YuCrpSrDI43/acO0wXu/jPtW44NZe0/AFMTDw5FN77xfnLIsSnqL6DsRrFJQM+kJ/sVRzYwHsTutrK2E3EbJG8p3wi41/YPHypbzoSBUa+TSvKHcE82HIj25Df5EVXnd/wtg1H4bF07VrQbhhGvAM5eeB1aBk6bcIXcV21To0RfKVfxaWWLg3YluYDqlJFaKQNgHahbuvcyydU5jGvWiU9922mFxSXxtCAk5rG6uzvhoNYPwxUSBFTUqZ8+AF512YAA+zb4mGmmMSGC+wxslDc0uCXaHwT+wqqI2OUnjXdi8DmeYeYPhiayJ/+SNSZoxCJniS2G0CwN57vgWQ/gpGRVkcyPxB1qtG7AwomlAI/CufbeOaFiT92ofgn1pY/2c5jnxci3TvmlKPB7q3ghZUm6t90Z37xNR50Fp4FihP1TrNA2KK7+/E/9gfcMDjFoQX4Ka7jFfYEn3kGlYGbrw+v1jjjQPC9S1kOy0qN98MlhlrKY9sZ/ylyWlZ/y+h7YozVEfbnmK1ZS9ayZEcThyR6/ob28X1oJYDAAA
+// Get upgrade errors by reason
+cluster('aks').database('AKSprod').AsyncQoSEvents
+| where TIMESTAMP >= ago(30d)
+| where not(isTestSubscription(subscriptionID))
+| where isProdEnv(Environment)
+| where not(isTestRegion(region))
+| where isAksOperation(operationName)
+| where not(isAksSysOperation(correlationID))
+| where not(usePreviewFeature(propertiesBag))
+| where propertiesBag contains "VirtualMachineScaleSets"
+| where resultType == "1"
+| where suboperationName contains "upgrad"// "scal"//"upgrad"// // "creat" // "updat"//// "creat" //"updat"//"creat"// 
+| project operationID, region, operationName, suboperationName, resultType, RPTenant, resultCode, resultSubCode, resultCodeDependency, categorizedErrorSubCode, categorizedErrorDependency, categorizedErrorCategory, serviceBuild, categorizedErrorAKSTeam, TIMESTAMP
+| where operationName == "PutManagedClusterHandler.PUT"
+//| summarize count() by region
+//| where categorizedErrorDependency == ""
+| summarize count() by resultCode, resultSubCode, categorizedErrorCategory, categorizedErrorSubCode, categorizedErrorDependency
+| top 3 by count_
+| join (cluster('aks').database('AKSprod').AsyncQoSEvents
+| where TIMESTAMP >= ago(30d)
+| where not(isTestSubscription(subscriptionID))
+| where isProdEnv(Environment)
+| where not(isTestRegion(region))
+| where isAksOperation(operationName)
+| where not(isAksSysOperation(correlationID))
+| where not(usePreviewFeature(propertiesBag))
+| where propertiesBag contains "VirtualMachineScaleSets"
+| where resultType == "1") on resultSubCode
+| project errorDetails
+| extend json=parse_json(errorDetails)
+| extend reason = iff(errorDetails contains "quota", "quota", "")
+| extend reason = iff(errorDetails contains "too many requests", "throttling", reason)
+| extend reason = iff(errorDetails contains "Drain ", "PDB", reason)
+| extend reason = iff(errorDetails contains "coredns", "PDB_AKS", reason)
+| extend reason = iff(errorDetails contains "kube-proxy", "PDB_AKS", reason)
+| extend reason = iff(errorDetails contains "aksbus", "aksbus", reason)
+| extend reason = iff(errorDetails contains "update node to unschedulable", "CouldNotSetUnschedulable", reason)
+| extend reason = iff(errorDetails contains "connection refused", "APIServerConnectionRefused", reason)
+| extend reason = iff(errorDetails contains "unexpected EOF", "APIServerConnectionEOF", reason)
+| extend reason = iff(errorDetails contains "i/o timeout", "APIServerConnectionTimeout", reason)
+| extend reason = iff(errorDetails contains "unable to return a response in the time allotted", "APIServerUnableInTimeAlloted", reason)
+| extend reason = iff(errorDetails contains "more than one PodDisruptionBudget", "MoreThanOnePDB", reason)
+| extend reason = iff(errorDetails contains "Operation 'manualUpgrade' is only allowed", "VMSSNotInManualUpgradeMode", reason)
+| extend reason = iff(errorDetails contains "since it is marked for deletion", "VMMarkedForDeletion", reason)
+| extend reason = iff(errorDetails contains "unable to create new content in namespace", "NamespaceBeingTerminated", reason)
+| summarize count() by tostring(json.code), reason
+| order by count_ desc
+| where reason contains "APIServer"
+
+
 // Check how many CREATEs with AAD
 AsyncQoSEvents
 | where TIMESTAMP > ago(7d)
