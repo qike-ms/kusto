@@ -263,6 +263,16 @@ cluster('azurecm').database('AzureCM').LogContainerSnapshot
 //| project containerId, roleInstanceName
 
 
+https://dataexplorer.azure.com/clusters/azurecm/databases/AzureCM?query=H4sIAAAAAAAAA22QTU/CQBCG7/6KDRda0yXUtmAPHAgnEjFG4OKFTHcHWN2Puh8gxB9vi0qMcNrJu/M+884wGZxHG3XhGCwy1Y17HDxU4DDqjlttMmu0B7OZGO1BaLRzDbXbGn/zSfZbtEieGqNwuBAK5x5UTSr0e0QdabOPaF7wuNdryzg+W1yoHLOi9sLoKSejEemss/thCllByzzLaY5ZSquMFXSwvstLVmZFWfY7Z4A1EqfaedAMH0HhCbGCN0c5riFIXxsjadpPi3zYH9Cdcm6Vtvbamldk/iJ0coFMCPtdecoTog3H9vWoQfvvhsWpTsh4B0JCJaTwhxejmx/4o8zxp30nrA8gZ8C2DXWpxXs4IZ9x09wh+XeVJqwLSoEVRySo+QjsZqXgI7qMfhuT6nBlgesDvwAdj+Ui9AEAAA==
+// Find last appearance of a vm.
+//
+cluster('azurecm').database('AzureCM').LogContainerSnapshot
+| where PreciseTimeStamp between(now(-45d)..now())
+| where subscriptionId == "f3871a35-9434-4e31-b3c5-6f249c935990"
+| where roleInstanceName == "_aks-defaultpool-10154706-vmss_1"
+| project PreciseTimeStamp, roleInstanceName, containerId, nodeId, tenantName, Tenant, AvailabilityZone, availabilitySetName, virtualMachineUniqueId, Region, subscriptionId
+| summarize end=arg_max(PreciseTimeStamp, *) by roleInstanceName, virtualMachineUniqueId
+
 
 
 
