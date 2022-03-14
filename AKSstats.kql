@@ -15,6 +15,9 @@
 
 .show database AKSstats principals 
 
+// Extend retention of a table to 5 years.
+.alter-merge table CoresPerCustomerBBM policy retention softdelete = 2000d
+
 .show operations b9b84ae6-9c5e-44b9-9726-238fca196654
 
 ////////////////     CRON INSERTS      ///////////////////////////////////////
