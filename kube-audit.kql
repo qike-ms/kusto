@@ -1,0 +1,34 @@
+﻿let popularICs = (ingress: string) {
+case(ingress contains 'appgw' or ingress contains 'application-gateway', 'agic',
+     ingress contains 'nginx', 'nginx',
+     ingress contains 'kong', 'kong',
+     ingress contains 'traefik', 'traefik',
+     ingress contains 'envoy', 'envoy',
+     ingress contains 'gloo', 'gloo',
+     ingress contains 'ambassador', 'ambassador',
+     ingress contains 'contour', 'contour',
+     ingress contains 'haproxy', 'haproxy',
+     ingress contains 'istio', 'istio', 
+     ingress contains 'voyager', 'voyager', 'Other')
+};
+let startTime = startofday(ago(1d));
+let endTime = endofday(ago(1d));
+union (cluster('aksccplogs.centralus.kusto.windows.net').database('AKSccplogs').ControlPlaneEventsNonShoebox | where PreciseTimeStamp >= startTime and PreciseTimeStamp <= endTime),
+(cluster('aksccplogs.centralus.kusto.windows.net').database('AKSccplogs').ControlPlaneEvents | where PreciseTimeStamp >= startTime and PreciseTimeStamp <= endTime)
+| where category == 'kube-audit'
+| where properties contains @'\"verb\":\"watch\"'
+| where properties contains @'\"resource\":\"ingresses\"'
+| extend log=parse_json(tostring(parse_json(properties).log))
+//| where log.userAgent contains 'ingress'
+| extend user_agent=tostring(split(log.userAgent, "/", 0)[0]), 
+         subscriptionID = tolower(split(resourceId, '/')[2])
+| where subscriptionID !in (AKS_GetInternalSubscriptions)
+| extend IC = popularICs(user_agent)
+| where IC != 'Other'
+| distinct ccpNamespace, subscriptionID, IC
+| join kind = leftouter (AKS_Subscriptions_Snapshot
+| project SubscriptionGuid, Customer, TPId, P360_ID) on $left.subscriptionID == $right.SubscriptionGuid
+| summarize CustomerCount = dcount(P360_ID, 2), ClusterCount = dcount(ccpNamespace, 2) by IC
+| sort by ClusterCount desc 
+
+
