@@ -1,0 +1,14 @@
+// Get subscriptions whose node image is among certain 2022.02 and 2022.03 images
+cluster('aks.kusto.windows.net').database('AKSprod').ManagedClusterMonitoring
+| where PreciseTimeStamp > ago(1d)
+| where entitytype == 'agentpoolresource'
+| extend JSON = parse_json(msg)
+| extend id=tostring(JSON.id)
+| extend image=tostring(JSON.agentPoolVersionProfile.nodeImageReference.id)
+| distinct subscriptionID, id, image
+| where image !contains "gen2"
+| where image contains "/2022.02" or image contains "/2022.03"
+| where image !contains "/2022.02.15"
+| where image !contains "/2022.02.07"
+| where image !contains "/2022.02.01"
+| distinct subscriptionID
