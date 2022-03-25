@@ -1131,3 +1131,14 @@ VMScaleSetModel
   or VMSize contains "ND40rs_v2" or VMSize contains "ND24rs" or VMSize contains "NC24rs_v3" or VMSize contains "NC24rs_v2" or VMSize contains "NC24r"
 
 ////////////////////////////////////////////////////////////////////////
+
+// Get all writes to a vmss
+let ['_startTime']=datetime('2022-03-10 00:00:00');
+let ['_endTime']=datetime('2022-03-19 00:00:00');
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet 
+| where PreciseTimeStamp between (_startTime .. _endTime)
+| where subscriptionId == "710ce9ae-dfed-4c2d-b815-d9011249c5f4"
+| where resourceGroupName == "MC_rg-2051st_aks-je2051stblue-001_japaneast"
+| extend r = parse_json(requestEntity) | extend sku=tostring(r.sku.name), size=tostring(r.properties.hardwareProfile.vmSize), cnt= toint(r.sku.capacity)
+| extend vmSize = iff(isempty(sku), size, sku)
+| project PreciseTimeStamp, operationName, vmSize, cnt, r, userAgent, resultCode, resourceName, resourceGroupName
