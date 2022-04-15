@@ -10,3 +10,20 @@ AksPingFailures
                                          RCALevel1)
 | summarize count() by RCA
 | render piechart 
+
+// Get VM hiccup events
+//
+cluster('Vmainsight').database('vmadb').VmImpactingEventsV1 
+| where PreciseTimeStamp > ago(5d)
+| where (NodeId == "a814abcf-5961-4d09-a377-d1878eb5c304" and RoleInstanceName == "_aks-ingest-22746978-vmss_6")
+  or (NodeId == "b2757124-0931-43f8-84f1-7ccf51506ca2" and RoleInstanceName == "_aks-ingest-26117304-vmss_14")
+| distinct PreciseTimeStamp,  NodeId, NodeIp, ContainerId, RoleInstanceName, RCAEngineCategory, RCALevel1, RCALevel2, RCALevel3
+
+cluster('Vmainsight').database('vmadb').VmImpactingEventsV1 
+| where PreciseTimeStamp > ago(5d)
+| where RCAEngineCategory == "Unplanned" 
+| where (RoleInstanceName startswith "_aks-ingest-22746978-vmss_") // and NodeId == "a814abcf-5961-4d09-a377-d1878eb5c304" 
+  or (RoleInstanceName startswith "_aks-ingest-26117304-vmss_") // and NodeId == "b2757124-0931-43f8-84f1-7ccf51506ca2"
+| distinct PreciseTimeStamp,  NodeId, NodeIp, ContainerId, RoleInstanceName, RCAEngineCategory, RCALevel1, RCALevel2, RCALevel3
+| sort by RoleInstanceName
+| summarize count() by RCALevel2
