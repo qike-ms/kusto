@@ -1,5 +1,22 @@
-// This file captures CCP events stats
+// This file captures CCP and Node events stats
 // For debugging one cluster, use file: AKS-debug.kql
+
+// Subscriptions using Mariner
+cluster('aksccplogs.centralus').database('AKSccplogs').CCP_Nodes
+| where PreciseTimeStamp > ago(1d)
+//| where metadata.labels.['kubernetes.azure.com/node-image-version'] contains "2022"
+| where metadata.labels.['kubernetes.azure.com/node-image-version'] contains "Mariner"
+//| where metadata.labels.['kubernetes.azure.com/node-image-version'] !contains "Windows"
+//| where metadata.labels.['kubernetes.azure.com/node-image-version'] !contains "gen2"
+//| where metadata.labels.['kubernetes.azure.com/node-image-version'] !contains "02.01"
+//  and metadata.labels.['kubernetes.azure.com/node-image-version'] !contains "2022.01"
+//  and metadata.labels.['kubernetes.azure.com/node-image-version'] !contains "02.07"
+//  and metadata.labels.['kubernetes.azure.com/node-image-version'] !contains "02.15"
+//| extend region=tostring(iff(isnotempty(metadata.labels.['topology.kubernetes.io/region']), metadata.labels.['topology.kubernetes.io/region'], metadata.labels.['failure-domain.beta.kubernetes.io/region']))
+| summarize by resourceId
+| extend SubscriptionID=extract('/SUBSCRIPTIONS/(.*)/RESOURCEGROUPS/.*', 1, resourceId)
+| project-away resourceId
+| distinct SubscriptionID
 
 // Audit logs related to network policy
 ControlPlaneEvents
