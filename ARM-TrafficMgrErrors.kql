@@ -4,7 +4,7 @@
     and operationName == 'GET/SUBSCRIPTIONS/RESOURCEGROUPS/PROVIDERS/MICROSOFT.CONTAINERSERVICE/MANAGEDCLUSTERS/'
     and hostName == 'acs-eastus.trafficmanager.net'
 | join kind = inner (
-    FrontEndContextActivity
+    FrontEndContextActivit  // join with AKS RP logs
     | where TIMESTAMP between ((datetime(2019-08-27 00:00:00)) .. (datetime(2019-08-27 00:50:00)) )
         and operationName contains "GetManagedClusterHandler.GET"
         and level == "error"
