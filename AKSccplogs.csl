@@ -1,6 +1,26 @@
 // This file captures CCP and Node events stats
 // For debugging one cluster, use file: AKS-debug.kql
 
+
+// Get CSI controller errors
+union cluster('Aks').database('AKSccplogs').ControlPlaneEventsAll , cluster('Aks').database('AKSccplogs').ControlPlaneEventsNonShoebox //| summarize min (PreciseTimeStamp)
+| where TIMESTAMP > ago (1h)
+| where category == "csi-azuredisk-controller"
+| where properties contains "GRPC r"
+| extend Pod = extractjson('$.pod', properties, typeof(string)), Log = extractjson('$.log', properties , typeof(string))
+| extend _jlog = parse_json(Log)
+| extend requestURI = tostring(_jlog.requestURI)
+| extend verb = tostring(_jlog.verb)
+| extend user = tostring(_jlog.user.username)
+| extend replicas = _jlog.responseObject.status.replicas
+| extend readyReplicas = _jlog.responseObject.status.readyReplicas
+| extend unavailableReplicas = _jlog.responseObject.status.unavailableReplicas
+| project PreciseTimeStamp, category, requestURI, verb, user, Log, replicas, readyReplicas, unavailableReplicas, ccpNamespace
+//| distinct ccpNamespace
+| limit 1000
+
+
+
 // Subscriptions using Mariner
 cluster('aksccplogs.centralus').database('AKSccplogs').CCP_Nodes
 | where PreciseTimeStamp > ago(1d)
