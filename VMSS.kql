@@ -37,28 +37,122 @@ cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 
 
 /////////////////////////////////////
-// All Cloud Provider errors.      //
+// Throttling errors               //
 /////////////////////////////////////
-// resultType: 0:success, 1: usererror, 2: system error
-// Cloud Provider errors for disk ops
-ApiQosEvent_nonGet
-| where PreciseTimeStamp > ago(90d)
-| where resourceName startswith 'aks'  
-| where userAgent contains_cs "kubernetes-cloudprovider"
-| where resultType != 0
-| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
-| summarize count() by day = bin(PreciseTimeStamp, 1d), resultType, resultCode
-| render timechart  with (series=resultType,resultCode)
+// Most throttled userAgent
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent
+| where PreciseTimeStamp > ago(30d)
+| where subscriptionId == '71cce8cd-49d7-4463-bf9f-20dd2a68c5eb' 
+| where httpStatusCode == 429 
+| project PreciseTimeStamp, resourceGroupName, resourceName, resultCode, httpStatusCode, errorDetails, userAgent
+| summarize count() by  bin(PreciseTimeStamp, 1h), userAgent
+| sort by PreciseTimeStamp desc, count_ desc 
+| render timechart 
+
+// Most throttled operationName
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent
+| where PreciseTimeStamp > ago(1d)
+| where subscriptionId == '71cce8cd-49d7-4463-bf9f-20dd2a68c5eb'
+//| where operationName == 'VirtualMachineScaleSets.virtualMachines.GET' // Expensive deep get for VMSS
+| where httpStatusCode == 429 
+| project PreciseTimeStamp, operationName, resourceGroupName, resourceName, resultCode, httpStatusCode, errorDetails, userAgent
+| summarize count() by  bin(PreciseTimeStamp, 1h), operationName
+| sort by PreciseTimeStamp desc, count_ desc 
+| render timechart 
+
+// Most frequent caller of the expensive VMSS GET call
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent
+| where PreciseTimeStamp > ago(1d)
+| where subscriptionId == '71cce8cd-49d7-4463-bf9f-20dd2a68c5eb'
+| where operationName == 'VirtualMachineScaleSets.virtualMachines.GET'
+| project PreciseTimeStamp, operationName, resourceGroupName, resourceName, resultCode, httpStatusCode, errorDetails, userAgent
+| summarize count() by  bin(PreciseTimeStamp, 1h), userAgent
+| sort by PreciseTimeStamp desc, count_ desc 
+| render timechart 
+
+/////////////////////////////////////
+// All Cloud Provider errors.      //
+// resultType: 0:success, 1: usererror, 2: system error //
+/////////////////////////////////////
+
+// Get disk attach while detach errors due to cloud provider bug for AKS 
+cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(100d)
+| where resultType == 1
+| where resourceName startswith 'aks'  // AKS VMSS
+//| where resultCode == 'ConflictingUserInput' and httpStatusCode == 409
+| where errorDetails contains "A disk with name kubernetes-dynamic-pvc-" and errorDetails contains "already exists in Resource Group " 
+| summarize count() by bin(PreciseTimeStamp, 1d)
+| render timechart 
 
 // Cloud Provider errors excluding disk ops
 ApiQosEvent_nonGet
 | where PreciseTimeStamp > ago(90d)
-| where resourceName startswith 'aks' 
-| where userAgent contains_cs "kubernetes-cloudprovider"
 | where resultType != 0
+| where resourceName startswith 'aks'   // AKS VMSS
+| where userAgent contains_cs "kubernetes-cloudprovider" or userAgent contains_cs "csi.azure.com"
 | where labels !contains_cs "DiskAttached" and labels !contains_cs "DiskDetached"
 | summarize count() by day = bin(PreciseTimeStamp, 1d), resultType, resultCode
 | render timechart  with (series=resultType,resultCode)
+
+//////////////////////////////////////////////////////////////////////////
+// VMSS disk attach/detach count and error by day
+//////////////////////////////////////////////////////////////////////////
+
+// Disk Attach Detach errors
+ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(90d)
+| where resultType != 0
+| where resourceName startswith 'aks'   // AKS VMSS 
+| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
+| where userAgent contains_cs "kubernetes-cloudprovider" or userAgent contains_cs "csi.azure.com"
+| summarize count() by day = bin(PreciseTimeStamp, 1d), resultType, resultCode
+| render timechart  with (series=resultType,resultCode)
+
+// Server error and user error rate for disk attach detach
+ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(30d)
+//| where operationName in ('VMScaleSetVMs.VMScaleSetVMsOperation.PUT', 'VirtualMachines.ResourceOperation.PATCH', 'VirtualMachines.ResourceOperation.PUT')
+| where resourceName startswith 'aks'   // AKS VMSS 
+| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
+| where userAgent contains_cs "kubernetes-cloudprovider" or userAgent contains_cs "csi.azure.com"
+| extend l=parse_json(labels), r=parse_json(requestEntity)
+| extend data=r.properties.storageProfile.dataDisks, diskOp = iff(tobool(l.DiskAttached), "attach", "detach")
+| project PreciseTimeStamp, diskOp, latencyInSeconds=e2EDurationInMilliseconds/1000., region, r, data, l, userAgent, errorDetails, exceptionType, resourceName, resultType
+| summarize total=count(), userErr = countif(resultType == 1), serverErr = countif(resultType == 2)  by diskOp, bin(PreciseTimeStamp, 1d)
+| extend serverErrRate=serverErr*100./total, userErrRate=userErr*100./total
+//| project-away total, err
+| render timechart 
+
+
+// VMSS disk attach, detach latency by day
+ApiQosEvent_nonGet
+| where PreciseTimeStamp > ago(30d)
+| where resultType ==0
+| where resourceName startswith 'aks'   // AKS VMSS 
+| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
+| where userAgent contains_cs "kubernetes-cloudprovider" or userAgent contains_cs "csi.azure.com"
+| extend l=parse_json(labels), r=parse_json(requestEntity)
+| extend data=r.properties.storageProfile.dataDisks, diskOp = iff(tobool(l.DiskAttached), "attach", "detach")
+| project-away Node, MonitoringApplication, Pid, Tid, serviceBuild, wFAppName, partitionId, replicaId, apiVersion, SourceNamespace, SourceVersion, goalSeekingActivityId, labels
+| project PreciseTimeStamp, diskOp, latencyInSeconds=e2EDurationInMilliseconds/1000., region, r, data, l, userAgent, errorDetails, exceptionType, resourceName
+| summarize percentiles(latencyInSeconds, 50, 95, 99, 99.9), max(latencyInSeconds) by diskOp, bin(PreciseTimeStamp, 1d)
+| render timechart 
+
+
+// Disk Attach Detach latency by hour
+cluster('azcrp.kusto.windows.net').database('crp_allprod').ApiQosEvent_nonGet 
+| where PreciseTimeStamp > ago(1d)
+| where resourceName startswith 'aks'  // AKS VMSS
+| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
+| where userAgent contains_cs "kubernetes-cloudprovider" or userAgent contains_cs "csi.azure.com"
+| where resultType == 0 
+| summarize (p50, p95, p99, p100) = percentiles(e2EDurationInMilliseconds/1000, 50, 95, 99, 100) by hour = bin(PreciseTimeStamp, 1h), attach=labels contains_cs "DiskAttached"
+| sort by hour desc, attach desc
+
+
+cluster('azurecm').database('AzureCM').CRP_Latency_Trends_By_Subscriptions(ago(7d), ago(0h), 99, "CrpAttachDisk", dynamic(['b9d2281e-dcd5-4dfd-9a97-0d50377cdf76'])) 
+| render timechart
 
 
 ////////////////////////////////////
@@ -272,15 +366,6 @@ cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 | render timechart 
 
 
-// Get disk attach while detach errors due to cloud provider bug for AKS 
-cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
-| where PreciseTimeStamp > ago(100d)
-| where resourceName startswith 'aks'
-| where resultType == 1
-//| where resultCode == 'ConflictingUserInput' and httpStatusCode == 409
-| where errorDetails contains "A disk with name kubernetes-dynamic-pvc-" and errorDetails contains "already exists in Resource Group " 
-| summarize count() by bin(PreciseTimeStamp, 1d)
-| render timechart 
 
 // VMProcessingHalted
 cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
@@ -437,58 +522,6 @@ cluster('azcrp').database('crp_allprod').ApiQosEvent_nonGet
 | extend e2eInMin = round(e2EDurationInMilliseconds / 60000., 2)
 | summarize percentiles(e2eInMin, 50, 95, 99) by bin(PreciseTimeStamp, 1d) // , max(e2eInMin)
 | render timechart 
-
-//////////////////////////////////////////////////////////////////////////
-// VMSS disk attach/detach count and error by day
-//////////////////////////////////////////////////////////////////////////
-ApiQosEvent_nonGet
-| where PreciseTimeStamp > ago(30d)
-| where resourceName startswith 'aks'  
-| where operationName in ('VMScaleSetVMs.VMScaleSetVMsOperation.PUT', 'VirtualMachines.ResourceOperation.PATCH', 'VirtualMachines.ResourceOperation.PUT')
-| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
-| where userAgent contains_cs "kubernetes-cloudprovider"
-| extend l=parse_json(labels), r=parse_json(requestEntity)
-| extend data=r.properties.storageProfile.dataDisks, diskOp = iff(tobool(l.DiskAttached), "attach", "detach")
-| project PreciseTimeStamp, diskOp, latencyInSeconds=e2EDurationInMilliseconds/1000., region, r, data, l, userAgent, errorDetails, exceptionType, resourceName, resultType
-| summarize total=count(), userErr = countif(resultType == 1), serverErr = countif(resultType == 2)  by diskOp, bin(PreciseTimeStamp, 1d)
-| extend serverErrRate=serverErr*100./total, userErrRate=userErr*100./total
-//| project-away total, err
-| render timechart 
-
-
-// VMSS disk attach, detach latency by day
-ApiQosEvent_nonGet
-| where PreciseTimeStamp > ago(30d)
-| where resultType ==0
-| where resourceName startswith 'aks'  
-| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
-| where userAgent contains_cs "kubernetes-cloudprovider"
-| extend l=parse_json(labels), r=parse_json(requestEntity)
-| extend data=r.properties.storageProfile.dataDisks, diskOp = iff(tobool(l.DiskAttached), "attach", "detach")
-| project-away Node, MonitoringApplication, Pid, Tid, serviceBuild, wFAppName, partitionId, replicaId, apiVersion, SourceNamespace, SourceVersion, goalSeekingActivityId, labels
-| project PreciseTimeStamp, diskOp, latencyInSeconds=e2EDurationInMilliseconds/1000., region, r, data, l, userAgent, errorDetails, exceptionType, resourceName
-| summarize percentiles(latencyInSeconds, 50, 95, 99, 99.9), max(latencyInSeconds) by diskOp, bin(PreciseTimeStamp, 1d)
-| render timechart 
-
-/*  Do not use this one, use the one above using nonGet table,  Get disk attach, detach error rate
-ApiQosEvent    // the first two lines can be replaced by ApiQosEvent_nonGet and it will be much faster
-| where operationName in ('VMScaleSetVMs.VMScaleSetVMsOperation.PUT', 'VirtualMachines.ResourceOperation.PATCH', 'VirtualMachines.ResourceOperation.PUT')
-| where TIMESTAMP > ago(1d)
-| where resourceName startswith 'aks'  
-| where labels contains_cs "DiskAttached" or labels contains_cs "DiskDetached"
-| where userAgent contains_cs "kubernetes-cloudprovider"
-| extend l=parse_json(labels), r=parse_json(requestEntity)
-| extend data=r.properties.storageProfile.dataDisks, diskOp = iff(tobool(l.DiskAttached), "attach", "detach")
-| project-away Node, RPTenant, MonitoringApplication, Pid, Tid, serviceBuild, wFAppName, partitionId, replicaId, apiVersion, SourceNamespace, SourceMoniker, SourceVersion, goalSeekingActivityId, labels
-| project PreciseTimeStamp, diskOp, latencyInSeconds=e2EDurationInMilliseconds/1000., region, r, data, l, userAgent, errorDetails, exceptionType, resourceName, resultType
-| summarize total=count(), err = countif(resultType == 1) by diskOp, bin(PreciseTimeStamp, 1h)
-| extend errRate=err*100./total
-//| project-away total, err
-| render timechart 
-*/
-
-cluster('azurecm').database('AzureCM').CRP_Latency_Trends_By_Subscriptions(ago(7d), ago(0h), 99, "CrpAttachDisk", dynamic(['b9d2281e-dcd5-4dfd-9a97-0d50377cdf76'])) 
-| render timechart
 
 
 /////////////////////////////////////////////////////////////////////////
